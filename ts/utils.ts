@@ -8,6 +8,12 @@ type ElementTypesById<T extends ElementsById> = {
   [Id in keyof T]: new () => T[Id];
 };
 
+/**
+ * Finds and validates the specified elements.
+ * 
+ * Given an object mapping IDs to HTML element types, the specified elements are
+ * located, checked to ensure they are of the correct type, and returned.
+ */
 export function elementDeps<T extends ElementsById>(
   deps: ElementTypesById<T>
 ): T {
