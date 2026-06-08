@@ -1,6 +1,5 @@
 # NodeJS-stuff
 node_modules/
-package.json
 package-lock.json
 
 # VS Code
