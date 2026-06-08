@@ -15,7 +15,9 @@ export function elementDeps<T extends ElementsById>(
     new Set(Object.keys(result))
   );
   if (missingIds.size) {
-    throw new Error(`No elements were found with the following ids: ${Array.from(missingIds)}`);
+    throw new Error(
+      `No elements were found with the following ids: ${Array.from(missingIds)}`
+    );
   }
   return result as T;
 }
@@ -31,7 +33,8 @@ export function optionalElementDeps<T extends ElementsById>(
     }
     if (!(element instanceof type)) {
       throw new Error(
-        `Expected element with id ${id} to be an instance of ${type.name}, got: ${(element as object).constructor.name}`
+        `Expected element with id ${id} to be an instance of ${type.name}, ` +
+          `got: ${(element as object).constructor.name}`
       );
     }
     (result as ElementsById)[id] = element;

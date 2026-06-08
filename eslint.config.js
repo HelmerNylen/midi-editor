@@ -7,7 +7,7 @@ import eslintPluginPrettier from 'eslint-plugin-prettier';
 
 export default defineConfig([
   {
-    files: ['js/**/*.{js,mjs,cjs,ts,mts,cts}'],
+    files: ['**/*.{js,ts}'],
     plugins: {js, eslintPluginPrettier}, 
     extends: ['js/recommended'],
     languageOptions: {globals: globals.browser},
@@ -26,7 +26,6 @@ export default defineConfig([
       '@typescript-eslint/no-unused-vars': [
         'warn',
         {
-          // Tillåt _ som namn på oanvända variabler.
           argsIgnorePattern: '^_$',
           varsIgnorePattern: '^_$',
         },
@@ -35,7 +34,7 @@ export default defineConfig([
   },
   tseslint.configs.recommended,
   {
-    files: ['**/*.css'],
+    files: ['*.css'],
     plugins: {css},
     language: 'css/css',
     extends: ['css/recommended'],

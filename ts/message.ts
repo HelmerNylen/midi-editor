@@ -128,7 +128,11 @@ export class ChannelControlMessage implements Message {
   }
 
   toString() {
-    return `ChannelControlMessage(${ChannelControlType[this.type] ?? '0x' + this.type.toString(16)}, channel: ${this.channel}, data: 0x${this.data.toString(16)})`;
+    const type = ChannelControlType[this.type] ?? '0x' + this.type.toString(16);
+    return (
+      `ChannelControlMessage(${type}, channel: ${this.channel}, ` +
+      `data: 0x${this.data.toString(16)})`
+    );
   }
 }
 
@@ -160,7 +164,7 @@ export function apply14BitUpdate(
 
   value &= isMsb ? LSB_MASK_14_BIT : MSB_MASK_14_BIT;
   value |= isMsb ? message.data << 7 : message.data;
-  return value
+  return value;
 }
 
 export class GenericMessage implements Message {
@@ -187,7 +191,10 @@ export class GenericMessage implements Message {
   }
 
   toString() {
-    return `GenericMessage(${MessageType[this.messageType]}, channel: ${this.channel}, data: 0x${this.data.toHex()})`;
+    return (
+      `GenericMessage(${MessageType[this.messageType]}, channel: ` +
+      `${this.channel}, data: 0x${this.data.toHex()})`
+    );
   }
 }
 
@@ -267,7 +274,7 @@ export class Note {
 
   get isWhite(): boolean {
     const key = this.key;
-    return !(key & 1) !== (key > Key.E);
+    return !(key & 1) !== key > Key.E;
   }
 
   static fromKeyAndOctave(key: Key, octave: number): Note {

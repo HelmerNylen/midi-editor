@@ -132,7 +132,8 @@ export class Editor {
     }
     // Draw the black keys. TODO: there's probably a nicer way of computing the
     // ranges.
-    offset = 0; // White key offset of the current run (points to A, C, F, C, F, ...)
+    // White key offset of the current run (points to A, C, F, C, F, ...).
+    offset = 0;
     let index = 0; // Index of black key in current run
     let rangeSize = 1; // Size of current run of black keys (1, 2, 3, 2, 3, ...)
     for (const note of BLACK_KEYS) {
