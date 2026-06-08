@@ -1,3 +1,6 @@
+name: Deploy page
+run-name: Deploying page
+
 on:
   workflow_dispatch:
   push:
@@ -32,12 +35,18 @@ jobs:
         run: sed --in-place '/^\s*\/\//d' tsconfig.json
       - name: Build Typescript
         uses: alexthemaster/action-build-typescript@v1.3.1
+      - name: Move to output folder
+        run: |
+          mkdir out
+          cp -r js/ out/
+          cp -r ts/ out/
+          cp *.{html,css} out/
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '.'
+          path: 'out/'
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
