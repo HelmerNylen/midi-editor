@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <head>
+    <link rel="stylesheet" type="text/css" href="style.css" />
+    <title>MIDI Editor</title>
+    <script type="module" src="js/editor.js"></script>
+  </head>
+  <body>
+    <div class="topBar">
+      <button id="setupMidi">Set up MIDI</button>
+      <select id="input"></select>
+      <select id="output"></select>
+      <select id="waveform"></select>
+      <select id="melody"></select>
+      <button id="play">Play</button>
+    </div>
+    <div>
+      <canvas id="noteCanvas" class="noteCanvas"></canvas>
+    </div>
+    <script type="module">
+      import {Editor} from './js/editor.js';
+      let editor;
+      window.addEventListener('load', async () => {
+        editor = new Editor();
+      });
+    </script>
+  </body>
+</html>
