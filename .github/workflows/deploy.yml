@@ -26,6 +26,10 @@ jobs:
     steps:
       - name: Checkout project
         uses: actions/checkout@v6
+      - name: Tidy up tsconfig.json
+        # The Typescript build action reads the config as pure JSON,
+        # but it may contain comments.
+        run: sed --in-place '/^\s*\/\//d' tsconfig.json
       - name: Build Typescript
         uses: alexthemaster/action-build-typescript@v1.3.1
       - name: Setup Pages
