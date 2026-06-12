@@ -1,3 +1,5 @@
+'use strict';
+
 import {Note} from './note.js';
 
 // See https://midi.org/summary-of-midi-1-0-messages or

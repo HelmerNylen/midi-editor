@@ -1,3 +1,5 @@
+'use strict';
+
 import {TypedEventTarget} from './event.js';
 
 export class Selector<T> extends TypedEventTarget<{select: T | null}> {

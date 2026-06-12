@@ -1,3 +1,5 @@
+'use strict';
+
 import {TypedEventTarget} from './event.js';
 import {ChannelControlMessage, ChannelControlType, Message} from './message.js';
 import {Selector} from './selector.js';

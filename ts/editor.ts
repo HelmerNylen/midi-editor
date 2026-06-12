@@ -1,6 +1,9 @@
+'use strict';
+
 import {NoteOff, NoteOn} from './message.js';
 import {Note, NoteString} from './note.js';
 import {Player} from './player.js';
+import {PianoRenderer} from './rendering.js';
 import {Selector} from './selector.js';
 import {elementDeps, sleep} from './utils.js';
 
@@ -8,36 +11,9 @@ type Melody = Array<[Note | null, number]>;
 
 const TOP_BAR_HEIGHT_PIXELS = 64;
 const PIANO_HEIGHT_PIXELS = 64;
-const WHITE_KEY_COLOR = 'white';
 const WHITE_KEY_PRESSED_COLOR = 'salmon';
-const BLACK_KEY_COLOR = 'black';
 const BLACK_KEY_PRESSED_COLOR = 'salmon';
-const BLACK_KEY_HEIGHT_PIXELS = 34;
 const KEY_GAP_COLOR = '#222';
-const HALF_KEY_GAP_PIXELS = 1;
-const DEFAULT_PIANO_RANGE: readonly [Note, Note] = [
-  Note.fromString('A0'),
-  Note.fromString('C8'),
-];
-
-/**
- * Key coordinates on the x axis relative to the octave. The left edge of the C
- * key is at 0, and the right edge of the B key is at 1.
- */
-const NOTE_COORDS: ReadonlyArray<[number, number]> = [
-  [0, 1 / 7], // C
-  [(1 / 5) * (3 / 7), (2 / 5) * (3 / 7)], // Db
-  [1 / 7, 2 / 7], // D
-  [(3 / 5) * (3 / 7), (4 / 5) * (3 / 7)], // Db
-  [2 / 7, 3 / 7], // E
-  [3 / 7, 4 / 7], // F
-  [3 / 7 + (1 / 7) * (4 / 7), 3 / 7 + (2 / 7) * (4 / 7)], // Gb
-  [4 / 7, 5 / 7], // G
-  [3 / 7 + (3 / 7) * (4 / 7), 3 / 7 + (4 / 7) * (4 / 7)], // Ab
-  [5 / 7, 6 / 7], // A
-  [3 / 7 + (5 / 7) * (4 / 7), 3 / 7 + (6 / 7) * (4 / 7)], // Bb
-  [6 / 7, 1], // B
-];
 
 export class Editor {
   private readonly elements = elementDeps({
@@ -63,7 +39,7 @@ export class Editor {
     (melody) => melody.name[0].toUpperCase() + melody.name.substring(1)
   );
 
-  private readonly pianoRange = Array.from(DEFAULT_PIANO_RANGE);
+  private readonly pianoRenderer = new PianoRenderer();
   private drawContext = this.elements.noteCanvas.getContext('2d')!;
 
   constructor() {
@@ -81,13 +57,11 @@ export class Editor {
       passive: true,
     });
     this.elements.noteCanvas.addEventListener('wheel', ({deltaY, shiftKey}) => {
+      const pianoRange = this.pianoRenderer.getRange();
       const index = +shiftKey;
-      const delta = shiftKey !== deltaY > 0 ? 1 : -1;
-      this.pianoRange[index] = this.pianoRange[index].transpose(delta);
-      if (!this.pianoRange[index].isWhite) {
-        this.pianoRange[index] = this.pianoRange[index].transpose(delta);
-      }
-      console.log(`Scrolled to [${this.pianoRange}]`);
+      const delta = shiftKey !== deltaY > 0 ? -1 : 1;
+      pianoRange[index] = pianoRange[index].transpose(delta);
+      this.pianoRenderer.setRange({min: pianoRange[0], max: pianoRange[1]});
     });
 
     this.resizeCanvas();
@@ -98,6 +72,10 @@ export class Editor {
     this.elements.noteCanvas.width = window.innerWidth;
     this.elements.noteCanvas.height =
       window.innerHeight - TOP_BAR_HEIGHT_PIXELS;
+    this.pianoRenderer.setSize({
+      width: this.elements.noteCanvas.width,
+      height: PIANO_HEIGHT_PIXELS,
+    });
   }
 
   async play() {
@@ -121,15 +99,6 @@ export class Editor {
   private draw(_: DOMHighResTimeStamp) {
     const width = this.elements.noteCanvas.width;
     const height = this.elements.noteCanvas.height;
-
-    const [noteMin, noteMax] = this.pianoRange;
-    const octavesWidth =
-      noteMax.octave -
-      noteMin.octave +
-      NOTE_COORDS[noteMax.key][1] -
-      NOTE_COORDS[noteMin.key][0];
-    const pixelsPerOctave = width / octavesWidth;
-    const pianoStartOctaveOffset = NOTE_COORDS[noteMin.key][0];
     const pianoStartY = height - PIANO_HEIGHT_PIXELS;
 
     this.drawContext.clearRect(0, 0, width, height);
@@ -139,59 +108,37 @@ export class Editor {
     this.drawContext.fillStyle = KEY_GAP_COLOR;
     this.drawContext.fillRect(0, pianoStartY, width, PIANO_HEIGHT_PIXELS);
 
-    // First pass: draw the white keys. TODO: draw once when pianoRange changes
-    // and cache, then draw pressed keys on top. Same below.
-    const note: Note & {byteValue: number} = new Note(noteMin.byteValue);
-    for (; note.byteValue <= noteMax.byteValue; note.byteValue++) {
-      if (!note.isWhite) {
-        continue;
+    const notes = this.player.synthesizer
+      .getCurrentlyPressed()
+      .map((n) => new Note(n));
+
+    this.pianoRenderer.drawWhiteKeys(this.drawContext, 0, pianoStartY);
+    this.drawContext.fillStyle = WHITE_KEY_PRESSED_COLOR;
+    for (const note of notes) {
+      if (note.isWhite) {
+        const [keyStart, keyEnd] = this.pianoRenderer.getNoteCoords(note);
+        this.drawContext.fillRect(
+          keyStart,
+          pianoStartY,
+          keyEnd - keyStart,
+          PIANO_HEIGHT_PIXELS
+        );
       }
-
-      // TODO: We should probably keep track of this separately since a
-      // different output may be selected.
-      this.drawContext.fillStyle = this.player.synthesizer.isCurrentlyPressed(
-        note
-      )
-        ? WHITE_KEY_PRESSED_COLOR
-        : WHITE_KEY_COLOR;
-
-      const offset = note.octave - noteMin.octave - pianoStartOctaveOffset;
-      const [start, end] = NOTE_COORDS[note.key];
-      const keyStart =
-        Math.floor((offset + start) * pixelsPerOctave) + HALF_KEY_GAP_PIXELS;
-      const keyEnd =
-        Math.floor((offset + end) * pixelsPerOctave) - HALF_KEY_GAP_PIXELS;
-      this.drawContext.fillRect(
-        keyStart,
-        pianoStartY,
-        keyEnd - keyStart,
-        PIANO_HEIGHT_PIXELS
-      );
     }
 
-    // Second pass: draw the black keys on top of the white keys.
-    note.byteValue = noteMin.byteValue;
-    for (; note.byteValue <= noteMax.byteValue; note.byteValue++) {
-      if (note.isWhite) {
-        continue;
+    this.pianoRenderer.drawBlackKeys(this.drawContext, 0, pianoStartY);
+    this.drawContext.fillStyle = BLACK_KEY_PRESSED_COLOR;
+    const blackKeyHeight = this.pianoRenderer.getBlackKeyHeight();
+    for (const note of notes) {
+      if (!note.isWhite) {
+        const [keyStart, keyEnd] = this.pianoRenderer.getNoteCoords(note);
+        this.drawContext.fillRect(
+          keyStart,
+          pianoStartY,
+          keyEnd - keyStart,
+          blackKeyHeight
+        );
       }
-      // TODO: Same as above.
-      this.drawContext.fillStyle = this.player.synthesizer.isCurrentlyPressed(
-        note
-      )
-        ? BLACK_KEY_PRESSED_COLOR
-        : BLACK_KEY_COLOR;
-
-      const offset = note.octave - noteMin.octave - pianoStartOctaveOffset;
-      const [start, end] = NOTE_COORDS[note.key];
-      const keyStart = Math.floor((offset + start) * pixelsPerOctave);
-      const keyEnd = Math.floor((offset + end) * pixelsPerOctave);
-      this.drawContext.fillRect(
-        keyStart,
-        pianoStartY,
-        keyEnd - keyStart,
-        BLACK_KEY_HEIGHT_PIXELS
-      );
     }
 
     // Pedal state

@@ -1,3 +1,5 @@
+'use strict';
+
 import {TypedEventTarget} from './event.js';
 import {
   ChannelControlMessage,
@@ -6,7 +8,6 @@ import {
   NoteOn,
   parseMessage,
 } from './message.js';
-import {Note} from './note.js';
 import {Selector} from './selector.js';
 import {sleep} from './utils.js';
 
@@ -181,11 +182,12 @@ export class Synthesizer implements SimpleMIDIOutput {
     console.log(`Unmapped message: ${message}`);
   }
 
-  isCurrentlyPressed(note: Note): boolean {
-    return (
-      this.keyGraphs.has(note.byteValue) &&
-      (!this.sustain || this.sustained.has(note.byteValue))
-    );
+  getCurrentlyPressed(): number[] {
+    const active = Array.from(this.keyGraphs.keys());
+    if (this.sustain) {
+      return active.filter((n) => !this.sustained.has(n));
+    }
+    return active;
   }
 
   getSustain() {

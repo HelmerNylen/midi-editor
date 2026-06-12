@@ -1,3 +1,5 @@
+'use strict';
+
 export enum Key {
   C = 0,
   Db = 1,

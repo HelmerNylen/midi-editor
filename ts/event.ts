@@ -1,3 +1,5 @@
+'use strict';
+
 type EventListener<Target, Data = unknown> = (
   data: Data,
   target: Target
