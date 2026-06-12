@@ -2,11 +2,11 @@ import {TypedEventTarget} from './event.js';
 import {
   ChannelControlMessage,
   ChannelControlType,
-  Note,
   NoteOff,
   NoteOn,
   parseMessage,
 } from './message.js';
+import {Note} from './note.js';
 import {Selector} from './selector.js';
 import {sleep} from './utils.js';
 
@@ -100,7 +100,7 @@ export class Synthesizer implements SimpleMIDIOutput {
         selectElement,
         ['triangle', 'sawtooth', 'square', 'sine'],
         this.waveform,
-        (option) => option[0]!.toUpperCase() + option.substring(1)
+        (option) => option[0].toUpperCase() + option.substring(1)
       );
       this.waveformSelector.addEventListener('select', (option) => {
         if (option) {
