@@ -4,9 +4,9 @@ import {TypedEventTarget} from './event.js';
 import {
   ChannelControlMessage,
   ChannelControlType,
+  MessageParser,
   NoteOff,
   NoteOn,
-  parseMessage,
 } from './message.js';
 import {Selector} from './selector.js';
 import {sleep} from './utils.js';
@@ -67,6 +67,8 @@ class KeyGraph extends TypedEventTarget<{inactive: void}> {
 export class Synthesizer implements SimpleMIDIOutput {
   readonly name = 'Basic synth';
   readonly id = 'basic_js_synth';
+  private readonly parser = new MessageParser();
+
   private readonly keyGraphs = new Map<number, KeyGraph>();
   private readonly gain: GainNode;
   private waveform: OscillatorType = 'triangle';
@@ -84,6 +86,15 @@ export class Synthesizer implements SimpleMIDIOutput {
     this.inactiveKeyGraphs = Array.from(
       new Array(INITIAL_OSCILLATORS),
       () => new KeyGraph(this.gain, this.waveform)
+    );
+
+    this.parser.addEventListener('noteOn', (message) => this.noteOn(message));
+    this.parser.addEventListener('noteOff', (message) => this.noteOff(message));
+    this.parser.addEventListener('channelControl', (message) =>
+      this.channelControl(message)
+    );
+    this.parser.addEventListener('unmapped', (message) =>
+      console.log(`Unmapped message: ${message}`)
     );
 
     if (this.context.state === 'suspended') {
@@ -112,85 +123,72 @@ export class Synthesizer implements SimpleMIDIOutput {
   }
 
   send(data: Iterable<number>) {
-    const message = parseMessage(data);
-    if (message instanceof NoteOn) {
-      this.keyGraphs.get(message.note.byteValue)?.stop();
-      this.sustained.delete(message.note.byteValue);
-
-      const keyGraph =
-        this.inactiveKeyGraphs.pop() ?? new KeyGraph(this.gain, this.waveform);
-      this.keyGraphs.set(message.note.byteValue, keyGraph);
-      keyGraph.start(
-        message.note.frequency,
-        (GAIN_MULTIPLIER * message.velocity) / 0x7f,
-        this.waveform
-      );
-      keyGraph.addEventListener(
-        'inactive',
-        () => this.inactiveKeyGraphs.push(keyGraph),
-        true
-      );
-      return;
-    }
-    if (message instanceof NoteOff) {
-      if (this.sustain) {
-        this.sustained.add(message.note.byteValue);
-      } else {
-        this.keyGraphs.get(message.note.byteValue)?.stop();
-        this.keyGraphs.delete(message.note.byteValue);
-      }
-      return;
-    }
-    if (message instanceof ChannelControlMessage) {
-      switch (message.type) {
-        case ChannelControlType.SUSTAIN: {
-          const applySustain = message.data >= 0x40;
-          if (!applySustain) {
-            for (const note of this.sustained) {
-              this.keyGraphs.get(note)?.stop();
-              this.keyGraphs.delete(note);
-            }
-            this.sustained.clear();
-          }
-          this.sustain = applySustain;
-          break;
-        }
-        case ChannelControlType.ALL_NOTES_OFF:
-        case ChannelControlType.ALL_SOUND_OFF:
-          for (const keyGraph of this.keyGraphs.values()) {
-            keyGraph.stop(message.type === ChannelControlType.ALL_SOUND_OFF);
-          }
-          this.keyGraphs.clear();
-          break;
-        case ChannelControlType.RESET_ALL_CONTROLLERS:
-          this.sustain = false;
-          this.sustained.clear();
-          for (const keygraph of this.keyGraphs.values()) {
-            keygraph.stop(true);
-          }
-          this.keyGraphs.clear();
-          break;
-        // TODO: Implement volume / expression, see
-        // http://midi.teragonaudio.com/tech/midispec/exp.htm
-        // TODO: Implement program change.
-        default:
-          console.log(`Unmapped channel control message: ${message}`);
-          break;
-      }
-      return;
-    }
-    console.log(`Unmapped message: ${message}`);
+    this.parser.send(data);
   }
 
-  getCurrentlyPressed(): number[] {
-    const active = Array.from(this.keyGraphs.keys());
+  private noteOn({note, velocity}: NoteOn) {
+    this.keyGraphs.get(note.byteValue)?.stop();
+    this.sustained.delete(note.byteValue);
+
+    const keyGraph =
+      this.inactiveKeyGraphs.pop() ?? new KeyGraph(this.gain, this.waveform);
+    this.keyGraphs.set(note.byteValue, keyGraph);
+    keyGraph.start(
+      note.frequency,
+      (GAIN_MULTIPLIER * velocity) / 0x7f,
+      this.waveform
+    );
+    keyGraph.addEventListener(
+      'inactive',
+      () => this.inactiveKeyGraphs.push(keyGraph),
+      true
+    );
+  }
+
+  private noteOff({note}: NoteOff) {
     if (this.sustain) {
-      return active.filter((n) => !this.sustained.has(n));
+      this.sustained.add(note.byteValue);
+    } else {
+      this.keyGraphs.get(note.byteValue)?.stop();
+      this.keyGraphs.delete(note.byteValue);
     }
-    return active;
   }
 
-  getSustain() {
-    return this.sustain;
+  private channelControl(message: ChannelControlMessage) {
+    switch (message.type) {
+      case ChannelControlType.SUSTAIN: {
+        const applySustain = message.data >= 0x40;
+        if (!applySustain) {
+          for (const note of this.sustained) {
+            this.keyGraphs.get(note)?.stop();
+            this.keyGraphs.delete(note);
+          }
+          this.sustained.clear();
+        }
+        this.sustain = applySustain;
+        break;
+      }
+      case ChannelControlType.ALL_NOTES_OFF:
+      case ChannelControlType.ALL_SOUND_OFF:
+        for (const keyGraph of this.keyGraphs.values()) {
+          keyGraph.stop(message.type === ChannelControlType.ALL_SOUND_OFF);
+        }
+        this.keyGraphs.clear();
+        break;
+      case ChannelControlType.RESET_ALL_CONTROLLERS:
+        this.sustain = false;
+        this.sustained.clear();
+        for (const keygraph of this.keyGraphs.values()) {
+          keygraph.stop(true);
+        }
+        this.keyGraphs.clear();
+        break;
+      // TODO: Implement volume / expression, see
+      // http://midi.teragonaudio.com/tech/midispec/exp.htm
+      // TODO: Implement program change.
+      default:
+        console.log(`Unmapped channel control message: ${message}`);
+        break;
+    }
   }
 }

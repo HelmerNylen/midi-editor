@@ -11,8 +11,6 @@ type Melody = Array<[Note | null, number]>;
 
 const TOP_BAR_HEIGHT_PIXELS = 64;
 const PIANO_HEIGHT_PIXELS = 64;
-const WHITE_KEY_PRESSED_COLOR = 'salmon';
-const BLACK_KEY_PRESSED_COLOR = 'salmon';
 const KEY_GAP_COLOR = '#222';
 
 export class Editor {
@@ -21,6 +19,7 @@ export class Editor {
     play: HTMLButtonElement,
     noteCanvas: HTMLCanvasElement,
   });
+  private readonly pianoRenderer = new PianoRenderer();
   private readonly player = new Player();
 
   private readonly melodies: Array<() => Melody> = [
@@ -39,7 +38,6 @@ export class Editor {
     (melody) => melody.name[0].toUpperCase() + melody.name.substring(1)
   );
 
-  private readonly pianoRenderer = new PianoRenderer();
   private drawContext = this.elements.noteCanvas.getContext('2d')!;
 
   constructor() {
@@ -47,6 +45,9 @@ export class Editor {
       throw new Error('Failed to set up canvas');
     }
 
+    this.player.addEventListener('onmessage', (data) =>
+      this.pianoRenderer.send(data)
+    );
     this.melodySelector.addEventListener('select', (melody) => {
       if (melody) {
         this.melody = melody;
@@ -108,45 +109,8 @@ export class Editor {
     this.drawContext.fillStyle = KEY_GAP_COLOR;
     this.drawContext.fillRect(0, pianoStartY, width, PIANO_HEIGHT_PIXELS);
 
-    const notes = this.player.synthesizer
-      .getCurrentlyPressed()
-      .map((n) => new Note(n));
-
-    this.pianoRenderer.drawWhiteKeys(this.drawContext, 0, pianoStartY);
-    this.drawContext.fillStyle = WHITE_KEY_PRESSED_COLOR;
-    for (const note of notes) {
-      if (note.isWhite) {
-        const [keyStart, keyEnd] = this.pianoRenderer.getNoteCoords(note);
-        this.drawContext.fillRect(
-          keyStart,
-          pianoStartY,
-          keyEnd - keyStart,
-          PIANO_HEIGHT_PIXELS
-        );
-      }
-    }
-
-    this.pianoRenderer.drawBlackKeys(this.drawContext, 0, pianoStartY);
-    this.drawContext.fillStyle = BLACK_KEY_PRESSED_COLOR;
-    const blackKeyHeight = this.pianoRenderer.getBlackKeyHeight();
-    for (const note of notes) {
-      if (!note.isWhite) {
-        const [keyStart, keyEnd] = this.pianoRenderer.getNoteCoords(note);
-        this.drawContext.fillRect(
-          keyStart,
-          pianoStartY,
-          keyEnd - keyStart,
-          blackKeyHeight
-        );
-      }
-    }
-
-    // Pedal state
-    if (this.player.synthesizer.getSustain()) {
-      this.drawContext.fillStyle = WHITE_KEY_PRESSED_COLOR;
-      this.drawContext.font = '18px sans-serif';
-      this.drawContext.fillText('Sustain', 8, pianoStartY - 8);
-    }
+    this.pianoRenderer.drawPianoTo(this.drawContext, 0, pianoStartY);
+    this.pianoRenderer.drawPedalsTo(this.drawContext, 0, pianoStartY);
 
     this.drawContext.restore();
     requestAnimationFrame((time) => this.draw(time));

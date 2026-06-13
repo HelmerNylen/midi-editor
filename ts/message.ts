@@ -1,5 +1,6 @@
 'use strict';
 
+import {TypedEventTarget} from './event.js';
 import {Note} from './note.js';
 
 // See https://midi.org/summary-of-midi-1-0-messages or
@@ -36,16 +37,28 @@ export enum ChannelControlType {
   EXPRESSION_MSB = 0x2b,
   SUSTAIN = 0x40,
   PORTAMENTO = 0x41,
-  SOSTENATO = 0x42,
+  SOSTENUTO = 0x42,
   SOFT = 0x43,
+  LEGATO = 0x44,
+  HOLD_2 = 0x45,
   NON_REGISTERED_PARAMETER_NUMBER_LSB = 0x62,
   NON_REGISTERED_PARAMETER_NUMBER_MSB = 0x63,
   REGISTERED_PARAMETER_NUMBER_LSB = 0x64,
   REGISTERED_PARAMETER_NUMBER_MSB = 0x65,
   ALL_SOUND_OFF = 0x78,
   RESET_ALL_CONTROLLERS = 0x79,
+  LOCAL_CONTROL = 0x7a,
   ALL_NOTES_OFF = 0x7b,
 }
+
+export type ChannelControlSwitch =
+  | ChannelControlType.SUSTAIN
+  | ChannelControlType.PORTAMENTO
+  | ChannelControlType.SOSTENUTO
+  | ChannelControlType.SOFT
+  | ChannelControlType.LEGATO
+  | ChannelControlType.HOLD_2
+  | ChannelControlType.LOCAL_CONTROL;
 
 const MESSAGE_TYPE_MASK = 0xf0;
 const CHANNEL_MASK = 0x0f;
@@ -55,7 +68,7 @@ const MSB_MASK_14_BIT = DATA_MASK << 7;
 const CHANNEL_CONTROL_14_BIT_BLOCK = 0x3f;
 
 export interface Message {
-  serialize(): Iterable<number>;
+  serialize(): Uint8Array;
 }
 
 export class NoteOn implements Message {
@@ -73,11 +86,11 @@ export class NoteOn implements Message {
   }
 
   serialize() {
-    return [
+    return Uint8Array.of(
       MessageType.NOTE_ON | this.channel,
       this.note.byteValue,
-      this.velocity,
-    ];
+      this.velocity
+    );
   }
 }
 
@@ -96,11 +109,11 @@ export class NoteOff implements Message {
   }
 
   serialize() {
-    return [
+    return Uint8Array.of(
       MessageType.NOTE_OFF | this.channel,
       this.note.byteValue,
-      this.velocity,
-    ];
+      this.velocity
+    );
   }
 }
 
@@ -128,7 +141,11 @@ export class ChannelControlMessage implements Message {
   }
 
   serialize() {
-    return [MessageType.CONTROL_CHANGE | this.channel, this.type, this.data];
+    return Uint8Array.of(
+      MessageType.CONTROL_CHANGE | this.channel,
+      this.type,
+      this.data
+    );
   }
 
   toString() {
@@ -172,13 +189,18 @@ export function apply14BitUpdate(
 }
 
 export class GenericMessage implements Message {
-  constructor(
-    readonly status: number,
-    readonly data: Uint8Array
-  ) {
+  constructor(private readonly serialized: Uint8Array) {
+    if (serialized.length === 0) {
+      throw new Error(`Empty message: ${serialized}`);
+    }
+    const status = this.status;
     if (status !== (status & 0xff) || !(status & 0x80)) {
       throw new Error(`Invalid status byte: ${status}`);
     }
+  }
+
+  get status(): number {
+    return this.serialized[0];
   }
 
   get messageType(): MessageType {
@@ -189,9 +211,12 @@ export class GenericMessage implements Message {
     return this.status & CHANNEL_MASK;
   }
 
-  *serialize(): Iterable<number> {
-    yield this.status;
-    yield* this.data;
+  get data(): Uint8Array {
+    return this.serialized.subarray(1);
+  }
+
+  serialize() {
+    return this.serialized;
   }
 
   toString() {
@@ -202,35 +227,61 @@ export class GenericMessage implements Message {
   }
 }
 
-export function parseMessage(data: Iterable<number>): Message {
-  const iterator = data[Symbol.iterator]();
-  const consume: () => number = () => {
-    const result = iterator.next();
-    if (result.done) {
-      throw new Error(`Incomplete message received: ${data}`);
-    }
-    return result.value;
-  };
+interface MessageParserEvents {
+  message: Message;
+  noteOn: NoteOn;
+  noteOff: NoteOff;
+  channelControl: ChannelControlMessage;
+  unmapped: GenericMessage;
+}
 
-  const status = consume();
-  switch (status & MESSAGE_TYPE_MASK) {
-    case MessageType.NOTE_ON:
-      return new NoteOn(new Note(consume()), consume(), status & CHANNEL_MASK);
-    case MessageType.NOTE_OFF:
-      return new NoteOff(new Note(consume()), consume(), status & CHANNEL_MASK);
-    case MessageType.CONTROL_CHANGE: {
-      return new ChannelControlMessage(
-        consume(),
-        consume(),
-        status & CHANNEL_MASK
-      );
+export class MessageParser extends TypedEventTarget<MessageParserEvents> {
+  send(data: Iterable<number>): void {
+    const iterator = data[Symbol.iterator]();
+    const consume: () => number = () => {
+      const result = iterator.next();
+      if (result.done) {
+        throw new Error(`Incomplete message received: ${data}`);
+      }
+      return result.value;
+    };
+
+    const status = consume();
+    let message: Message;
+    switch (status & MESSAGE_TYPE_MASK) {
+      case MessageType.NOTE_ON:
+        message = new NoteOn(
+          new Note(consume()),
+          consume(),
+          status & CHANNEL_MASK
+        );
+        this.dispatchEvent('noteOn', message as NoteOn);
+        break;
+      case MessageType.NOTE_OFF:
+        message = new NoteOff(
+          new Note(consume()),
+          consume(),
+          status & CHANNEL_MASK
+        );
+        this.dispatchEvent('noteOff', message as NoteOff);
+        break;
+      case MessageType.CONTROL_CHANGE:
+        message = new ChannelControlMessage(
+          consume(),
+          consume(),
+          status & CHANNEL_MASK
+        );
+        this.dispatchEvent('channelControl', message as ChannelControlMessage);
+        break;
+      default:
+        message = new GenericMessage(
+          data instanceof Uint8Array
+            ? data
+            : Uint8Array.of(status, ...{[Symbol.iterator]: () => iterator})
+        );
+        this.dispatchEvent('unmapped', message as GenericMessage);
+        break;
     }
-    default:
-      return new GenericMessage(
-        status,
-        data instanceof Uint8Array
-          ? data.subarray(1)
-          : new Uint8Array({[Symbol.iterator]: () => iterator})
-      );
+    this.dispatchEvent('message', message);
   }
 }

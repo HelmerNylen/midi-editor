@@ -47,14 +47,18 @@ export class TypedEventTarget<EventMap extends object> {
     data?: EventMap[NoInfer<Type>]
   ): void {
     const callbacks = this.callbacksByType.get(type);
-    for (const callback of callbacks ? Array.from(callbacks) : []) {
+    if (!callbacks?.size) {
+      return;
+    }
+
+    for (const callback of Array.from(callbacks)) {
       try {
         callback(data, this);
       } catch (e) {
         console.error(e);
       }
       if (this.runOnlyOnce.has(callback)) {
-        callbacks!.delete(callback);
+        callbacks.delete(callback);
       }
     }
   }

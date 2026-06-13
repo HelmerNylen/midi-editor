@@ -26,7 +26,7 @@ export class Player extends TypedEventTarget<{onmessage: Uint8Array}> {
     setupMidi: HTMLButtonElement,
   });
 
-  readonly synthesizer = new Synthesizer(
+  private readonly synthesizer = new Synthesizer(
     new AudioContext(),
     this.elements.waveform
   );
@@ -108,6 +108,9 @@ export class Player extends TypedEventTarget<{onmessage: Uint8Array}> {
     }
     this.input.removeEventListener('midimessage', this.inputEventListener);
     this.input = input;
+    this.send(
+      new ChannelControlMessage(ChannelControlType.RESET_ALL_CONTROLLERS)
+    );
     this.input.addEventListener('midimessage', this.inputEventListener);
   }
 
@@ -115,11 +118,15 @@ export class Player extends TypedEventTarget<{onmessage: Uint8Array}> {
     if (output === this.output) {
       return;
     }
-    this.send(new ChannelControlMessage(ChannelControlType.ALL_NOTES_OFF));
+    this.send(
+      new ChannelControlMessage(ChannelControlType.RESET_ALL_CONTROLLERS)
+    );
     this.output = output;
   }
 
   send(data: Message) {
-    this.output.send(data.serialize());
+    const serialized = data.serialize();
+    this.output.send(serialized);
+    this.dispatchEvent('onmessage', serialized);
   }
 }

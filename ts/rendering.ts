@@ -1,5 +1,10 @@
 'use strict';
 
+import {
+  ChannelControlSwitch,
+  ChannelControlType,
+  MessageParser,
+} from './message.js';
 import {Note} from './note.js';
 
 /**
@@ -21,6 +26,12 @@ const NOTE_COORDS: ReadonlyArray<[number, number]> = [
   [6 / 7, 1], // B
 ];
 
+const PEDAL_NAMES: ReadonlyMap<ChannelControlSwitch, string> = new Map([
+  [ChannelControlType.SOFT, 'Soft'],
+  [ChannelControlType.SOSTENUTO, 'Sostenuto'],
+  [ChannelControlType.SUSTAIN, 'Sustain'],
+]);
+
 interface MutableNote extends Note {
   byteValue: number;
 }
@@ -39,7 +50,9 @@ export class PianoRenderer {
   private maximumNote = Note.fromString('C8');
   private blackKeyHeightRatio = 0.55;
   private blackKeyColor = 'black';
+  private blackKeyPressedColor = 'salmon';
   private whiteKeyColor = 'white';
+  private whiteKeyPressedColor = 'salmon';
   private whiteKeyGapPixels = 2;
 
   private dirty = false;
@@ -49,25 +62,71 @@ export class PianoRenderer {
   private readonly whiteKeysContext = this.whiteKeys.getContext('2d')!;
   private readonly blackKeysContext = this.blackKeys.getContext('2d')!;
 
+  private readonly messageParser = new MessageParser();
+  private readonly pressed = new Map<number, Note>();
+  private readonly switches = new Set<ChannelControlSwitch>();
+
+  constructor() {
+    this.messageParser.addEventListener('noteOn', ({note}) => {
+      this.pressed.set(note.byteValue, note);
+    });
+    this.messageParser.addEventListener('noteOff', ({note}) => {
+      this.pressed.delete(note.byteValue);
+    });
+    this.messageParser.addEventListener('channelControl', ({type, data}) => {
+      switch (type) {
+        case ChannelControlType.SUSTAIN:
+        case ChannelControlType.PORTAMENTO:
+        case ChannelControlType.SOSTENUTO:
+        case ChannelControlType.SOFT:
+        case ChannelControlType.LEGATO:
+        case ChannelControlType.HOLD_2:
+        case ChannelControlType.LOCAL_CONTROL:
+          if (data >= 0x40) {
+            this.switches.add(type);
+          } else {
+            this.switches.delete(type);
+          }
+          break;
+        case ChannelControlType.ALL_NOTES_OFF:
+        case ChannelControlType.ALL_SOUND_OFF:
+          this.pressed.clear();
+          break;
+        case ChannelControlType.RESET_ALL_CONTROLLERS:
+          this.pressed.clear();
+          this.switches.clear();
+          break;
+      }
+    });
+  }
+
+  send(data: Iterable<number>) {
+    this.messageParser.send(data);
+  }
+
   /** Gets the [minimum, maximum] note rendered in the piano. */
   getRange(): [Note, Note] {
     return [this.minimumNote, this.maximumNote];
   }
 
-  setRange({min, max}: {min?: Note; max?: Note}) {
-    min ??= this.minimumNote;
-    max ??= this.maximumNote;
+  setRange({
+    min = this.minimumNote,
+    max = this.maximumNote,
+  }: {
+    min?: Note;
+    max?: Note;
+  }) {
     if (!(min.byteValue <= max.byteValue)) {
       throw new Error(
         `Minimum note must be lower than maximum, got range [${min}, ${max}]`
       );
     }
-    if (min && min.byteValue !== this.minimumNote.byteValue) {
+    if (min.byteValue !== this.minimumNote.byteValue) {
       this.minimumNote = min;
       this.renderingParameters = null;
       this.dirty = true;
     }
-    if (max && max.byteValue !== this.maximumNote.byteValue) {
+    if (max.byteValue !== this.maximumNote.byteValue) {
       this.maximumNote = max;
       this.renderingParameters = null;
       this.dirty = true;
@@ -79,18 +138,20 @@ export class PianoRenderer {
     return [this.whiteKeys.width, this.whiteKeys.height];
   }
 
-  getBlackKeyHeight(): number {
-    return this.blackKeys.height;
-  }
-
-  setSize({width, height}: {width?: number; height?: number}) {
-    if (width !== undefined && width !== this.whiteKeys.width) {
+  setSize({
+    width = this.whiteKeys.width,
+    height = this.whiteKeys.height,
+  }: {
+    width?: number;
+    height?: number;
+  }) {
+    if (width !== this.whiteKeys.width) {
       this.whiteKeys.width = width;
       this.blackKeys.width = width;
       this.renderingParameters = null;
       this.dirty = true;
     }
-    if (height !== undefined && height !== this.whiteKeys.height) {
+    if (height !== this.whiteKeys.height) {
       this.whiteKeys.height = height;
       this.blackKeys.height = Math.ceil(height * this.blackKeyHeightRatio);
       this.renderingParameters = null;
@@ -116,6 +177,27 @@ export class PianoRenderer {
       pixelsPerOctave: this.whiteKeys.width / octavesWidth,
       octaveOffset: -minWhite.octave - NOTE_COORDS[minWhite.key][0],
     };
+  }
+
+  /** Returns the note coordinates in pixels along the X axis. */
+  getNoteCoords(note: Note): [number, number] {
+    if (!this.renderingParameters) {
+      this.updateRenderingParameters();
+    }
+
+    const gapAdjustment = note.isWhite ? this.whiteKeyGapPixels / 2 : 0;
+    const octaveStart = note.octave + this.renderingParameters!.octaveOffset;
+    const [start, end] = NOTE_COORDS[note.key];
+    return [
+      Math.floor(
+        (octaveStart + start) * this.renderingParameters!.pixelsPerOctave +
+          gapAdjustment
+      ),
+      Math.floor(
+        (octaveStart + end) * this.renderingParameters!.pixelsPerOctave -
+          gapAdjustment
+      ),
+    ];
   }
 
   private maybeUpdateCanvases() {
@@ -161,34 +243,56 @@ export class PianoRenderer {
     this.dirty = false;
   }
 
-  /** Returns the note coordinates in pixels along the X axis. */
-  getNoteCoords(note: Note): [number, number] {
-    if (!this.renderingParameters) {
-      this.updateRenderingParameters();
+  drawPianoTo(context: CanvasRenderingContext2D, x: number, y: number) {
+    context.save();
+    this.maybeUpdateCanvases();
+
+    context.drawImage(this.whiteKeys, x, y);
+    context.fillStyle = this.whiteKeyPressedColor;
+    for (const note of this.pressed.values()) {
+      if (note.isWhite) {
+        const [keyStart, keyEnd] = this.getNoteCoords(note);
+        context.fillRect(
+          x + keyStart,
+          y,
+          keyEnd - keyStart,
+          this.whiteKeys.height
+        );
+      }
     }
 
-    const gapAdjustment = note.isWhite ? this.whiteKeyGapPixels / 2 : 0;
-    const octaveStart = note.octave + this.renderingParameters!.octaveOffset;
-    const [start, end] = NOTE_COORDS[note.key];
-    return [
-      Math.floor(
-        (octaveStart + start) * this.renderingParameters!.pixelsPerOctave +
-          gapAdjustment
-      ),
-      Math.floor(
-        (octaveStart + end) * this.renderingParameters!.pixelsPerOctave -
-          gapAdjustment
-      ),
-    ];
-  }
-
-  drawWhiteKeys(context: CanvasRenderingContext2D, x: number, y: number) {
-    this.maybeUpdateCanvases();
-    context.drawImage(this.whiteKeys, x, y);
-  }
-
-  drawBlackKeys(context: CanvasRenderingContext2D, x: number, y: number) {
-    this.maybeUpdateCanvases();
     context.drawImage(this.blackKeys, x, y);
+    context.fillStyle = this.blackKeyPressedColor;
+    for (const note of this.pressed.values()) {
+      if (!note.isWhite) {
+        const [keyStart, keyEnd] = this.getNoteCoords(note);
+        context.fillRect(
+          x + keyStart,
+          y,
+          keyEnd - keyStart,
+          this.blackKeys.height
+        );
+      }
+    }
+
+    context.restore();
+  }
+
+  drawPedalsTo(context: CanvasRenderingContext2D, x: number, y: number) {
+    // TODO: This is not very pretty.
+    context.save();
+    context.fillStyle = 'salmon';
+    context.font = '18px sans-serif';
+    const padding = 8;
+
+    let offset = 0;
+    for (const pedal of this.switches) {
+      const name = PEDAL_NAMES.get(pedal);
+      if (name) {
+        context.fillText(name, x + padding + offset, y - padding);
+        offset += context.measureText(name).width + padding;
+      }
+    }
+    context.restore();
   }
 }
