@@ -15,7 +15,7 @@ const NOTE_COORDS: ReadonlyArray<[number, number]> = [
   [0, 1 / 7], // C
   [(1 / 5) * (3 / 7), (2 / 5) * (3 / 7)], // Db
   [1 / 7, 2 / 7], // D
-  [(3 / 5) * (3 / 7), (4 / 5) * (3 / 7)], // Db
+  [(3 / 5) * (3 / 7), (4 / 5) * (3 / 7)], // Eb
   [2 / 7, 3 / 7], // E
   [3 / 7, 4 / 7], // F
   [3 / 7 + (1 / 7) * (4 / 7), 3 / 7 + (2 / 7) * (4 / 7)], // Gb
@@ -198,6 +198,25 @@ export class PianoRenderer {
           gapAdjustment
       ),
     ];
+  }
+
+  /** Gets the note corresponding to the provided x coordinate in pixels. */
+  getNote(x: number): Note {
+    if (!this.renderingParameters) {
+      this.updateRenderingParameters();
+    }
+    if (this.whiteKeys.width === 0) {
+      return this.minimumNote;
+    }
+
+    // TODO: We could maybe do something fancier.
+    const byteValue =
+      this.minimumNote.byteValue +
+      (this.maximumNote.byteValue + 1 - this.minimumNote.byteValue) *
+        (x / this.whiteKeys.width);
+    return new Note(
+      Math.min(this.maximumNote.byteValue, Math.floor(byteValue))
+    );
   }
 
   private maybeUpdateCanvases() {

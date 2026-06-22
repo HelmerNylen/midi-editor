@@ -11,7 +11,16 @@ type Melody = Array<[Note | null, number]>;
 
 const TOP_BAR_HEIGHT_PIXELS = 64;
 const PIANO_HEIGHT_PIXELS = 64;
+const GRID_SIZE = 5;
 const KEY_GAP_COLOR = '#222';
+
+class KeyPress {
+  constructor(
+    readonly start: number,
+    readonly duration: number,
+    readonly note: Note
+  ) {}
+}
 
 export class Editor {
   private readonly elements = elementDeps({
@@ -29,6 +38,7 @@ export class Editor {
     chord,
     repeatedTone,
     repeatedChord,
+    this.compileDrawnMelody.bind(this),
   ];
   private melody = this.melodies[0];
   private readonly melodySelector = new Selector(
@@ -38,6 +48,8 @@ export class Editor {
     (melody) => melody.name[0].toUpperCase() + melody.name.substring(1)
   );
 
+  private notes: KeyPress[] = [];
+  private moveStart: [number, number] | null = null;
   private drawContext = this.elements.noteCanvas.getContext('2d')!;
 
   constructor() {
@@ -64,6 +76,15 @@ export class Editor {
       pianoRange[index] = pianoRange[index].transpose(delta);
       this.pianoRenderer.setRange({min: pianoRange[0], max: pianoRange[1]});
     });
+    this.elements.noteCanvas.addEventListener('mousedown', (e) =>
+      this.onCanvasMouseDown(e)
+    );
+    this.elements.noteCanvas.addEventListener('mouseup', (e) =>
+      this.onCanvasMouseUp(e)
+    );
+    this.elements.noteCanvas.addEventListener('click', (e) =>
+      this.onCanvasClick(e)
+    );
 
     this.resizeCanvas();
     requestAnimationFrame((time) => this.draw(time));
@@ -97,6 +118,65 @@ export class Editor {
     }
   }
 
+  private onCanvasMouseDown(e: MouseEvent) {
+    if (e.button === 0) {
+      this.moveStart = [e.offsetX, e.offsetY];
+      e.preventDefault();
+    }
+  }
+
+  private onCanvasMouseUp(e: MouseEvent) {
+    if (e.button === 0 && this.moveStart) {
+      const note = this.pianoRenderer.getNote(e.offsetX);
+      const start =
+        QUARTER *
+        Math.round(Math.min(this.moveStart[1], e.offsetY) / GRID_SIZE);
+      const duration =
+        QUARTER *
+          Math.max(
+            1,
+            Math.ceil(Math.max(this.moveStart[1], e.offsetY) / GRID_SIZE)
+          ) -
+        start;
+      this.notes.push(new KeyPress(start, duration, note));
+      console.log(`Added note ${note} at ${start} with length ${duration}`);
+      this.moveStart = null;
+      e.preventDefault();
+    }
+  }
+
+  private onCanvasClick(e: PointerEvent) {
+    if (e.button === 2) {
+      const note = this.pianoRenderer.getNote(e.offsetX);
+      const time = e.offsetY / GRID_SIZE;
+      const index = this.notes.findIndex(
+        (k) =>
+          k.note.byteValue === note.byteValue &&
+          k.start <= time &&
+          time <= k.start + k.duration
+      );
+      if (index !== -1) {
+        this.notes.splice(index, 1);
+      }
+      e.preventDefault();
+    }
+  }
+
+  private compileDrawnMelody(): Melody {
+    const result: Melody = [];
+    let last: KeyPress | null = null;
+    for (const keyPress of this.notes.toSorted((a, b) => a.start - b.start)) {
+      const gap = keyPress.start - (last?.start ?? 0);
+      if (gap > 0) {
+        result.push([null, gap]);
+      }
+      result.push([keyPress.note, keyPress.duration]);
+      last = keyPress;
+    }
+
+    return result;
+  }
+
   private draw(_: DOMHighResTimeStamp) {
     const width = this.elements.noteCanvas.width;
     const height = this.elements.noteCanvas.height;
@@ -111,6 +191,14 @@ export class Editor {
 
     this.pianoRenderer.drawPianoTo(this.drawContext, 0, pianoStartY);
     this.pianoRenderer.drawPedalsTo(this.drawContext, 0, pianoStartY);
+
+    this.drawContext.fillStyle = 'salmon';
+    for (const keyPress of this.notes) {
+      const [x0, x1] = this.pianoRenderer.getNoteCoords(keyPress.note);
+      const y = (keyPress.start * GRID_SIZE) / QUARTER;
+      const h = (keyPress.duration * GRID_SIZE) / QUARTER;
+      this.drawContext.fillRect(x0, y, x1 - x0, h);
+    }
 
     this.drawContext.restore();
     requestAnimationFrame((time) => this.draw(time));
