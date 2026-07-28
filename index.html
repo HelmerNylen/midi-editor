@@ -4,7 +4,7 @@
     <title>MIDI Editor</title>
 
     <link rel="stylesheet" type="text/css" href="style.css" />
-  
+
     <script type="module" src="js/editor.js"></script>
     <script type="module">
       import {Editor} from './js/editor.js';
@@ -17,6 +17,7 @@
   <body>
     <div class="topBar">
       <button id="setupMidi">Set up MIDI</button>
+      <button id="midiUpload">Load</button>
       <select id="input"></select>
       <select id="output"></select>
       <select id="waveform"></select>
@@ -26,5 +27,10 @@
     <div>
       <canvas id="noteCanvas" class="noteCanvas"></canvas>
     </div>
+    <input
+      id="midiUploadInput"
+      class="hidden"
+      type="file"
+      accept=".mid,.midi,audio/midi" />
   </body>
 </html>

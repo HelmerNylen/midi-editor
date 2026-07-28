@@ -1,6 +1,6 @@
 'use strict';
 
-import {NoteOff, NoteOn} from './message.js';
+import {FileParser, NoteOff, NoteOn} from './message.js';
 import {Note, NoteString} from './note.js';
 import {Player} from './player.js';
 import {PianoRenderer} from './rendering.js';
@@ -27,6 +27,8 @@ export class Editor {
     melody: HTMLSelectElement,
     play: HTMLButtonElement,
     noteCanvas: HTMLCanvasElement,
+    midiUpload: HTMLButtonElement,
+    midiUploadInput: HTMLInputElement,
   });
   private readonly pianoRenderer = new PianoRenderer();
   private readonly player = new Player();
@@ -84,6 +86,12 @@ export class Editor {
     );
     this.elements.noteCanvas.addEventListener('click', (e) =>
       this.onCanvasClick(e)
+    );
+    this.elements.midiUpload.addEventListener('click', () =>
+      this.elements.midiUploadInput.click()
+    );
+    this.elements.midiUploadInput.addEventListener('change', () =>
+      this.onMidiUpload(this.elements.midiUploadInput.files?.item(0) ?? null)
     );
 
     this.resizeCanvas();
@@ -160,6 +168,33 @@ export class Editor {
       }
       e.preventDefault();
     }
+  }
+
+  private async onMidiUpload(file: File | null) {
+    if (!file) {
+      return;
+    }
+
+    const buffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.addEventListener('loadend', () => {
+        if (reader.error) {
+          reject(reader.error);
+        } else {
+          resolve(reader.result as ArrayBuffer);
+        }
+      });
+      reader.readAsArrayBuffer(file);
+    });
+    const parser = new FileParser(buffer);
+    this.notes = [];
+    parser.addEventListener('note', ({on, start, stop}) => {
+      this.notes.push(
+        new KeyPress(start * 1000, (stop - start) * 1000, on.note)
+      );
+    });
+    parser.parse();
+    console.log(`Loaded melody with ${this.notes.length} notes`);
   }
 
   private compileDrawnMelody(): Melody {

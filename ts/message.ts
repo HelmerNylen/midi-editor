@@ -1,7 +1,7 @@
 'use strict';
 
 import {TypedEventTarget} from './event.js';
-import {Note} from './note.js';
+import {Key, keyFromNumSharps, Note} from './note.js';
 
 // See https://midi.org/summary-of-midi-1-0-messages or
 // https://midimusic.github.io/tech/midispec.html or
@@ -59,6 +59,41 @@ export type ChannelControlSwitch =
   | ChannelControlType.LEGATO
   | ChannelControlType.HOLD_2
   | ChannelControlType.LOCAL_CONTROL;
+
+export enum MetaEvent {
+  SEQUENCE_NUMBER = 0x00,
+  TEXT = 0x01,
+  COPYRIGHT = 0x02,
+  TRACK_NAME = 0x03,
+  INSTRUMENT_NAME = 0x04,
+  LYRIC = 0x05,
+  MARKER = 0x06,
+  CUE_POINT = 0x07,
+  PROGRAM_NAME = 0x08,
+  DEVICE_NAME = 0x09,
+  MIDI_CHANNEL_PREFIX = 0x20,
+  MIDI_PORT = 0x21,
+  END_OF_TRACK = 0x2f,
+  TEMPO = 0x51,
+  SMPTE_OFFSET = 0x54,
+  TIME_SIGNATURE = 0x58,
+  KEY_SIGNATURE = 0x59,
+  SEQUENCER_SPECIFIC = 0x7f,
+}
+
+export enum SystemMessage {
+  SYSTEM_EXCLUSIVE = 0xf0,
+  SONG_POSITION_POINTER = 0xf2,
+  SONG_SELECT = 0xf3,
+  TUNE_REQUEST = 0xf6,
+  END_OF_EXCLUSIVE = 0xf7,
+  TIMING_CLOCK = 0xf8,
+  START = 0xfa,
+  CONTINUE = 0xfb,
+  STOP = 0xfc,
+  ACTIVE_SENSING = 0xfe,
+  RESET = 0xff,
+}
 
 const MESSAGE_TYPE_MASK = 0xf0;
 const CHANNEL_MASK = 0x0f;
@@ -283,5 +318,287 @@ export class MessageParser extends TypedEventTarget<MessageParserEvents> {
         break;
     }
     this.dispatchEvent('message', message);
+  }
+}
+
+/**
+ * Reads a variable length quantity, returning a [result, offset] tuple with the
+ * offset pointing to the first byte after the quantity.
+ */
+function readUintN(view: DataView, offset: number): [number, number] {
+  let result = 0;
+  for (let i = 0; i < 4; i++) {
+    const byte = view.getUint8(offset++);
+    result <<= 7;
+    result |= byte & DATA_MASK;
+    if (!(byte & 0x80)) {
+      return [result, offset];
+    }
+  }
+  throw new Error(
+    `Variable length quantity longer than four bytes at offset ${offset}`
+  );
+}
+
+export enum TimeCode {
+  FPS_24 = 0xe8,
+  FPS_25 = 0xe7,
+  FPS_30 = 0xe2,
+  FPS_30_DROP = 0xe3,
+}
+const FPS_BY_TIME_CODE = new Map([
+  [TimeCode.FPS_24, 24],
+  [TimeCode.FPS_25, 25],
+  [TimeCode.FPS_30, 30],
+  [TimeCode.FPS_30_DROP, 29.97],
+]);
+
+export class FileParser extends TypedEventTarget<{
+  note: {on: NoteOn; off: NoteOff; start: number; stop: number};
+}> {
+  private view: DataView;
+  private asciiDecoder = new TextDecoder('ascii', {
+    fatal: true,
+    ignoreBOM: true,
+  });
+  private ticksPerQuarter?: number;
+  private ticksPerSecond?: number;
+
+  constructor(private buffer: ArrayBuffer) {
+    super();
+    this.view = new DataView(buffer);
+  }
+
+  parse() {
+    let offset = 0;
+    while (offset + 8 < this.buffer.byteLength) {
+      const type = this.asciiDecoder.decode(
+        this.buffer.slice(offset, offset + 4)
+      );
+      const length = this.view.getUint32(offset + 4);
+      if (offset + 8 + length > this.buffer.byteLength) {
+        throw new Error(
+          `Chunk of type ${type} at offset ${offset} ends at ` +
+            `${offset + 8 + length}, but the file is only ` +
+            `${this.buffer.byteLength} long`
+        );
+      }
+      const content = new DataView(this.buffer, offset + 8, length);
+
+      switch (type) {
+        case 'MThd':
+          this.readHeader(content);
+          break;
+        case 'MTrk':
+          this.readTrack(content);
+          break;
+        default:
+          console.log(`Unknown chunk type ${type} with length ${length}`);
+          break;
+      }
+
+      offset += 8 + length;
+    }
+  }
+
+  private readHeader(chunk: DataView) {
+    console.log(`Reading header with size ${chunk.byteLength} bytes`);
+    if (chunk.byteLength < 6) {
+      throw new Error(
+        `MIDI header must have at least 6 bytes, got: ${chunk.byteLength}`
+      );
+    }
+
+    const format = chunk.getUint16(0);
+    const numTracks = chunk.getUint16(2);
+    const division = chunk.getUint16(4);
+
+    if (format === 0 && numTracks !== 1) {
+      throw new Error(
+        `Format 0 files must have exactly one track, got: ${numTracks}`
+      );
+    }
+
+    if (division & 0x8000) {
+      // MIDI time code
+      const timeCode: TimeCode = chunk.getUint8(4);
+      if (!FPS_BY_TIME_CODE.has(timeCode)) {
+        throw new Error(`Invalid time code: ${timeCode}`);
+      }
+      const ticksPerFrame = chunk.getUint8(5);
+      console.log(
+        `Time code ${timeCode.toString(16)}, ${ticksPerFrame} ticks/frame`
+      );
+      this.ticksPerSecond = ticksPerFrame * FPS_BY_TIME_CODE.get(timeCode)!;
+    } else {
+      // Ticks per quarter
+      console.log(`${division} ticks per quarter`);
+      this.ticksPerQuarter = division;
+    }
+
+    console.log(`Format ${format}, ${numTracks} tracks`);
+  }
+
+  private readTrack(chunk: DataView) {
+    console.log(`Reading track with size ${chunk.byteLength} bytes`);
+
+    let offset = 0;
+    let ticks = 0;
+    const pressed = new Map<number, {on: NoteOn; start: number}>();
+    const messageParser = new MessageParser();
+    messageParser.addEventListener('noteOn', (on: NoteOn) => {
+      pressed.set(on.note.byteValue, {on, start: ticks * this.ticksPerSecond!});
+    });
+    messageParser.addEventListener('noteOff', (off) => {
+      const press = pressed.get(off.note.byteValue);
+      if (!press) {
+        return;
+      }
+      this.dispatchEvent('note', {
+        ...press,
+        off,
+        stop: ticks * this.ticksPerSecond!,
+      });
+    });
+
+    let lastStatus = null;
+    while (offset < chunk.byteLength) {
+      let delta;
+      [delta, offset] = readUintN(chunk, offset);
+      ticks += delta;
+
+      let status = chunk.getUint8(offset++);
+      if (!(status & 0x80)) {
+        // Running status
+        if (lastStatus === null) {
+          throw new Error(`Missing status byte in first event`);
+        }
+        status = lastStatus;
+      } else {
+        lastStatus = status;
+      }
+
+      switch (status & MESSAGE_TYPE_MASK) {
+        case MessageType.SYSTEM_COMMON: {
+          offset = this.handleSysex(chunk, offset, status);
+          break;
+        }
+        case MessageType.PROGRAM_CHANGE:
+        case MessageType.CHANNEL_PRESSURE: {
+          // Parse MIDI event of length 2.
+          messageParser.send(Uint8Array.of(status, chunk.getUint8(offset++)));
+          break;
+        }
+        default: {
+          // Parse MIDI event of length 3.
+          messageParser.send(
+            Uint8Array.of(
+              status,
+              chunk.getUint8(offset++),
+              chunk.getUint8(offset++)
+            )
+          );
+          break;
+        }
+      }
+    }
+  }
+
+  private handleSysex(chunk: DataView, offset: number, status: number): number {
+    switch (status) {
+      case SystemMessage.SYSTEM_EXCLUSIVE: {
+        while (chunk.getUint8(offset++) !== SystemMessage.END_OF_EXCLUSIVE) {
+          // Skip over message.
+        }
+        break;
+      }
+      case SystemMessage.END_OF_EXCLUSIVE: {
+        let length;
+        [length, offset] = readUintN(chunk, offset);
+        // Skip over message.
+        offset += length;
+        break;
+      }
+      case SystemMessage.RESET: {
+        // Meta event: FF <event type> <len> <len bytes of data>
+        const metaEventType = chunk.getUint8(offset);
+        const dataLength = chunk.getUint8(offset + 1);
+        const data = new Uint8Array(
+          chunk.buffer,
+          chunk.byteOffset + offset + 2,
+          dataLength
+        );
+        this.handleMeta(metaEventType, data);
+        offset += dataLength + 2;
+        break;
+      }
+      case SystemMessage.SONG_POSITION_POINTER: {
+        const songPosition =
+          (chunk.getUint8(offset + 1) << 7) | chunk.getUint8(offset);
+        console.log(`Song position pointer event with data ${songPosition}`);
+        offset += 2;
+        break;
+      }
+      case SystemMessage.SONG_SELECT: {
+        const songIndex = chunk.getUint8(offset);
+        console.log(`Song select event with data ${songIndex}`);
+        offset += 1;
+        break;
+      }
+      default: {
+        console.log(`${SystemMessage[status]} event`);
+      }
+    }
+
+    return offset;
+  }
+
+  private handleMeta(type: MetaEvent, data: Uint8Array) {
+    switch (type) {
+      case MetaEvent.TEXT:
+      case MetaEvent.COPYRIGHT:
+      case MetaEvent.TRACK_NAME:
+      case MetaEvent.INSTRUMENT_NAME:
+      case MetaEvent.LYRIC:
+      case MetaEvent.MARKER:
+      case MetaEvent.CUE_POINT: {
+        console.log(`${MetaEvent[type]}: ${this.asciiDecoder.decode(data)}`);
+        break;
+      }
+      case MetaEvent.KEY_SIGNATURE: {
+        console.log(
+          `Key: ${Key[keyFromNumSharps(data[0])]} ` +
+            `${data[1] ? 'minor' : 'major'}`
+        );
+        break;
+      }
+      case MetaEvent.TIME_SIGNATURE: {
+        const numerator = data[0];
+        const denominator = 1 << data[1];
+        const ticksPerUnit = data[2];
+        const unitLengthInNotesBy32 = data[3];
+        console.log(
+          `Time signature ${numerator}/${denominator}, ${ticksPerUnit} ticks ` +
+            `per quarter, ${32 / unitLengthInNotesBy32} quarters per note`
+        );
+        break;
+      }
+      case MetaEvent.TEMPO: {
+        const tempo = (data[0] << 16) | (data[1] << 8) | data[2];
+        // TODO: This only uses the first reported tempo.
+        if (
+          this.ticksPerSecond === undefined &&
+          this.ticksPerQuarter !== undefined
+        ) {
+          this.ticksPerSecond = this.ticksPerQuarter / tempo;
+        }
+        console.log(`Tempo: ${tempo} us/quarter`);
+        break;
+      }
+      default: {
+        console.log(`${MetaEvent[type]} meta event with data`, data);
+        break;
+      }
+    }
   }
 }

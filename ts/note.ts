@@ -46,6 +46,10 @@ export function usesFlats(keySignature: Key): boolean {
   }
 }
 
+export function keyFromNumSharps(sharps: number): Key {
+  return (7 * (sharps + 12)) % 12;
+}
+
 export function keyLabel(key: Key, keySignature: Key = Key.C): string {
   return KEY_LABELS[key][+usesFlats(keySignature)];
 }
