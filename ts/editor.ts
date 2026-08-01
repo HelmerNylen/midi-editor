@@ -186,9 +186,14 @@ export class Editor {
       });
       reader.readAsArrayBuffer(file);
     });
+
     const parser = new FileParser(buffer);
     this.notes = [];
+    let notesToLog = 3;
     parser.addEventListener('note', ({on, start, stop}) => {
+      if (notesToLog-- > 0) {
+        console.log(`Note ${on.note} at ${start} with length ${stop - start}`);
+      }
       this.notes.push(
         new KeyPress(start * 1000, (stop - start) * 1000, on.note)
       );

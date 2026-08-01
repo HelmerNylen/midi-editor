@@ -362,7 +362,7 @@ export class FileParser extends TypedEventTarget<{
     ignoreBOM: true,
   });
   private ticksPerQuarter?: number;
-  private ticksPerSecond?: number;
+  private secondsPerTick?: number;
 
   constructor(private buffer: ArrayBuffer) {
     super();
@@ -429,10 +429,11 @@ export class FileParser extends TypedEventTarget<{
       console.log(
         `Time code ${timeCode.toString(16)}, ${ticksPerFrame} ticks/frame`
       );
-      this.ticksPerSecond = ticksPerFrame * FPS_BY_TIME_CODE.get(timeCode)!;
+      this.secondsPerTick =
+        1 / (ticksPerFrame * FPS_BY_TIME_CODE.get(timeCode)!);
     } else {
       // Ticks per quarter
-      console.log(`${division} ticks per quarter`);
+      console.log(`${division} ticks/quarter`);
       this.ticksPerQuarter = division;
     }
 
@@ -444,10 +445,17 @@ export class FileParser extends TypedEventTarget<{
 
     let offset = 0;
     let ticks = 0;
+    let notesToLog = 3;
     const pressed = new Map<number, {on: NoteOn; start: number}>();
     const messageParser = new MessageParser();
     messageParser.addEventListener('noteOn', (on: NoteOn) => {
-      pressed.set(on.note.byteValue, {on, start: ticks * this.ticksPerSecond!});
+      if (notesToLog-- > 0) {
+        console.log(
+          `Note ${on.note} pressed at ${ticks} ticks ` +
+            `(${ticks * this.secondsPerTick!} s)`
+        );
+      }
+      pressed.set(on.note.byteValue, {on, start: ticks * this.secondsPerTick!});
     });
     messageParser.addEventListener('noteOff', (off) => {
       const press = pressed.get(off.note.byteValue);
@@ -457,7 +465,7 @@ export class FileParser extends TypedEventTarget<{
       this.dispatchEvent('note', {
         ...press,
         off,
-        stop: ticks * this.ticksPerSecond!,
+        stop: ticks * this.secondsPerTick!,
       });
     });
 
@@ -575,11 +583,12 @@ export class FileParser extends TypedEventTarget<{
       case MetaEvent.TIME_SIGNATURE: {
         const numerator = data[0];
         const denominator = 1 << data[1];
-        const ticksPerUnit = data[2];
+        const clocksPerClick = data[2];
         const unitLengthInNotesBy32 = data[3];
         console.log(
-          `Time signature ${numerator}/${denominator}, ${ticksPerUnit} ticks ` +
-            `per quarter, ${32 / unitLengthInNotesBy32} quarters per note`
+          `Time signature ${numerator}/${denominator}, metronome click every ` +
+            `${clocksPerClick} clocks (${24 / clocksPerClick} clicks/quarter)` +
+            `, ${32 / unitLengthInNotesBy32} quarters per note`
         );
         break;
       }
@@ -587,12 +596,18 @@ export class FileParser extends TypedEventTarget<{
         const tempo = (data[0] << 16) | (data[1] << 8) | data[2];
         // TODO: This only uses the first reported tempo.
         if (
-          this.ticksPerSecond === undefined &&
+          this.secondsPerTick === undefined &&
           this.ticksPerQuarter !== undefined
         ) {
-          this.ticksPerSecond = this.ticksPerQuarter / tempo;
+          this.secondsPerTick = (1e-6 * tempo) / this.ticksPerQuarter;
+          console.log(
+            `Tempo: ${tempo} [us/quarter] / ${this.ticksPerQuarter} ` +
+              `[ticks/quarter] = ${this.secondsPerTick} [s/tick]`
+          );
+        } else {
+          console.log(`Tempo: ${tempo} us/quarter`);
         }
-        console.log(`Tempo: ${tempo} us/quarter`);
+        console.log(`Tempo equivalent to ${60000000 / tempo} BPM`);
         break;
       }
       default: {
