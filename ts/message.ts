@@ -1,7 +1,8 @@
 'use strict';
 
 import {TypedEventTarget} from './event.js';
-import {Key, keyFromNumSharps, Note} from './note.js';
+import {keyFromNumSharps, keyLabel, Note} from './note.js';
+import {TempoMap} from './tempo.js';
 
 // See https://midi.org/summary-of-midi-1-0-messages or
 // https://midimusic.github.io/tech/midispec.html or
@@ -364,6 +365,9 @@ export class FileParser extends TypedEventTarget<{
   private ticksPerQuarter?: number;
   private secondsPerTick?: number;
 
+  private tempoEventEmitter = new TypedEventTarget<{tempo: number}>();
+  private tempoMap?: TempoMap;
+
   constructor(private buffer: ArrayBuffer) {
     super();
     this.view = new DataView(buffer);
@@ -449,13 +453,18 @@ export class FileParser extends TypedEventTarget<{
     const pressed = new Map<number, {on: NoteOn; start: number}>();
     const messageParser = new MessageParser();
     messageParser.addEventListener('noteOn', (on: NoteOn) => {
+      const press = {
+        on,
+        start: this.tempoMap
+          ? this.tempoMap.ticksToSeconds(ticks)
+          : ticks * this.secondsPerTick!,
+      };
       if (notesToLog-- > 0) {
         console.log(
-          `Note ${on.note} pressed at ${ticks} ticks ` +
-            `(${ticks * this.secondsPerTick!} s)`
+          `Note ${on.note} pressed at ${ticks} ticks (${press.start} s)`
         );
       }
-      pressed.set(on.note.byteValue, {on, start: ticks * this.secondsPerTick!});
+      pressed.set(on.note.byteValue, press);
     });
     messageParser.addEventListener('noteOff', (off) => {
       const press = pressed.get(off.note.byteValue);
@@ -465,9 +474,15 @@ export class FileParser extends TypedEventTarget<{
       this.dispatchEvent('note', {
         ...press,
         off,
-        stop: ticks * this.secondsPerTick!,
+        stop: this.tempoMap
+          ? this.tempoMap.ticksToSeconds(ticks)
+          : ticks * this.secondsPerTick!,
       });
     });
+
+    const tempoMapBuilder = TempoMap.builder(this.ticksPerQuarter!);
+    const addTempo = (tempo: number) => tempoMapBuilder.addChange(ticks, tempo);
+    this.tempoEventEmitter.addEventListener('tempo', addTempo);
 
     let lastStatus = null;
     while (offset < chunk.byteLength) {
@@ -509,6 +524,12 @@ export class FileParser extends TypedEventTarget<{
           break;
         }
       }
+    }
+
+    this.tempoEventEmitter.removeEventListener('tempo', addTempo);
+    if (tempoMapBuilder.length && !this.tempoMap) {
+      // TODO: Format 2 files may have different tempos for different tracks.
+      this.tempoMap = tempoMapBuilder.build();
     }
   }
 
@@ -574,10 +595,8 @@ export class FileParser extends TypedEventTarget<{
         break;
       }
       case MetaEvent.KEY_SIGNATURE: {
-        console.log(
-          `Key: ${Key[keyFromNumSharps(data[0])]} ` +
-            `${data[1] ? 'minor' : 'major'}`
-        );
+        const key = keyFromNumSharps(data[0]);
+        console.log(`Key: ${keyLabel(key)} ${data[1] ? 'minor' : 'major'}`);
         break;
       }
       case MetaEvent.TIME_SIGNATURE: {
@@ -594,20 +613,7 @@ export class FileParser extends TypedEventTarget<{
       }
       case MetaEvent.TEMPO: {
         const tempo = (data[0] << 16) | (data[1] << 8) | data[2];
-        // TODO: This only uses the first reported tempo.
-        if (
-          this.secondsPerTick === undefined &&
-          this.ticksPerQuarter !== undefined
-        ) {
-          this.secondsPerTick = (1e-6 * tempo) / this.ticksPerQuarter;
-          console.log(
-            `Tempo: ${tempo} [us/quarter] / ${this.ticksPerQuarter} ` +
-              `[ticks/quarter] = ${this.secondsPerTick} [s/tick]`
-          );
-        } else {
-          console.log(`Tempo: ${tempo} us/quarter`);
-        }
-        console.log(`Tempo equivalent to ${60000000 / tempo} BPM`);
+        this.tempoEventEmitter.dispatchEvent('tempo', tempo);
         break;
       }
       default: {

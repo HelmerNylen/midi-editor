@@ -12,7 +12,7 @@ type ElementTypesById<T extends ElementsById> = {
 
 /**
  * Finds and validates the specified elements.
- * 
+ *
  * Given an object mapping IDs to HTML element types, the specified elements are
  * located, checked to ensure they are of the correct type, and returned.
  */
@@ -31,6 +31,13 @@ export function elementDeps<T extends ElementsById>(
   return result as T;
 }
 
+/**
+ * Finds and validates the specified elements.
+ *
+ * Given an object mapping IDs to HTML element types, the specified elements are
+ * located, checked to ensure they are of the correct type, and returned. IDs
+ * that could not be found are omitted from the returned object.
+ */
 export function optionalElementDeps<T extends ElementsById>(
   deps: ElementTypesById<T>
 ): Partial<T> {
@@ -49,4 +56,13 @@ export function optionalElementDeps<T extends ElementsById>(
     (result as ElementsById)[id] = element;
   }
   return result;
+}
+
+/**
+ * Floors the provided number to the nearest integer after first adding a small
+ * `epsilon` to compensate for floating-point rounding errors. This ensures
+ * values like 2.9999999998 are rounded to 3 instead of 2.
+ */
+export function floorInexact(x: number, epsilon = 1e-6): number {
+  return Math.floor(x + epsilon);
 }
