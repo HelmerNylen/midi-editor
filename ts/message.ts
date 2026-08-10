@@ -96,6 +96,160 @@ export enum SystemMessage {
   RESET = 0xff,
 }
 
+export enum Instrument {
+  ACOUSTIC_GRAND_PIANO = 0,
+  BRIGHT_ACOUSTIC_PIANO = 1,
+  ELECTRIC_GRAND_PIANO = 2,
+  HONKY_TONK_PIANO = 3,
+  ELECTRIC_PIANO_1 = 4,
+  ELECTRIC_PIANO_2 = 5,
+  HARPSICHORD = 6,
+  CLAVI = 7,
+  CELESTA = 8,
+  GLOCKENSPIEL = 9,
+  MUSIC_BOX = 10,
+  VIBRAPHONE = 11,
+  MARIMBA = 12,
+  XYLOPHONE = 13,
+  TUBULAR_BELLS = 14,
+  DULCIMER = 15,
+  DRAWBAR_ORGAN = 16,
+  PERCUSSIVE_ORGAN = 17,
+  ROCK_ORGAN = 18,
+  CHURCH_ORGAN = 19,
+  REED_ORGAN = 20,
+  ACCORDION = 21,
+  HARMONICA = 22,
+  TANGO_ACCORDION = 23,
+  ACOUSTIC_GUITAR_NYLON = 24,
+  ACOUSTIC_GUITAR_STEEL = 25,
+  ELECTRIC_GUITAR_JAZZ = 26,
+  ELECTRIC_GUITAR_CLEAN = 27,
+  ELECTRIC_GUITAR_MUTED = 28,
+  OVERDRIVEN_GUITAR = 29,
+  DISTORTION_GUITAR = 30,
+  GUITAR_HARMONICS = 31,
+  ACOUSTIC_BASS = 32,
+  ELECTRIC_BASS_FINGER = 33,
+  ELECTRIC_BASS_PICK = 34,
+  FRETLESS_BASS = 35,
+  SLAP_BASS_1 = 36,
+  SLAP_BASS_2 = 37,
+  SYNTH_BASS_1 = 38,
+  SYNTH_BASS_2 = 39,
+  VIOLIN = 40,
+  VIOLA = 41,
+  CELLO = 42,
+  CONTRABASS = 43,
+  TREMOLO_STRINGS = 44,
+  PIZZICATO_STRINGS = 45,
+  ORCHESTRAL_HARP = 46,
+  TIMPANI = 47,
+  STRING_ENSEMBLE_1 = 48,
+  STRING_ENSEMBLE_2 = 49,
+  SYNTH_STRINGS_1 = 50,
+  SYNTH_STRINGS_2 = 51,
+  CHOIR_AAHS = 52,
+  VOICE_OOHS = 53,
+  SYNTH_VOICE = 54,
+  ORCHESTRA_HIT = 55,
+  TRUMPET = 56,
+  TROMBONE = 57,
+  TUBA = 58,
+  MUTED_TRUMPET = 59,
+  FRENCH_HORN = 60,
+  BRASS_SECTION = 61,
+  SYNTH_BRASS_1 = 62,
+  SYNTH_BRASS_2 = 63,
+  SOPRANO_SAX = 64,
+  ALTO_SAX = 65,
+  TENOR_SAX = 66,
+  BARITONE_SAX = 67,
+  OBOE = 68,
+  ENGLISH_HORN = 69,
+  BASSOON = 70,
+  CLARINET = 71,
+  PICCOLO = 72,
+  FLUTE = 73,
+  RECORDER = 74,
+  PAN_FLUTE = 75,
+  BLOWN_BOTTLE = 76,
+  SHAKUHACHI = 77,
+  WHISTLE = 78,
+  OCARINA = 79,
+  LEAD_1_SQUARE = 80,
+  LEAD_2_SAWTOOTH = 81,
+  LEAD_3_CALLIOPE = 82,
+  LEAD_4_CHIFF = 83,
+  LEAD_5_CHARANG = 84,
+  LEAD_6_VOICE = 85,
+  LEAD_7_FIFTHS = 86,
+  LEAD_8_BASS_LEAD = 87,
+  PAD_1_NEW_AGE = 88,
+  PAD_2_WARM = 89,
+  PAD_3_POLYSYNTH = 90,
+  PAD_4_CHOIR = 91,
+  PAD_5_BOWED = 92,
+  PAD_6_METALLIC = 93,
+  PAD_7_HALO = 94,
+  PAD_8_SWEEP = 95,
+  FX_1_RAIN = 96,
+  FX_2_SOUNDTRACK = 97,
+  FX_3_CRYSTAL = 98,
+  FX_4_ATMOSPHERE = 99,
+  FX_5_BRIGHTNESS = 100,
+  FX_6_GOBLINS = 101,
+  FX_7_ECHOES = 102,
+  FX_8_SCI_FI = 103,
+  SITAR = 104,
+  BANJO = 105,
+  SHAMISEN = 106,
+  KOTO = 107,
+  KALIMBA = 108,
+  BAG_PIPE = 109,
+  FIDDLE = 110,
+  SHANAI = 111,
+  TINKLE_BELL = 112,
+  AGOGO = 113,
+  STEEL_DRUMS = 114,
+  WOODBLOCK = 115,
+  TAIKO_DRUM = 116,
+  MELODIC_TOM = 117,
+  SYNTH_DRUM = 118,
+  REVERSE_CYMBAL = 119,
+  GUITAR_FRET_NOISE = 120,
+  BREATH_NOISE = 121,
+  SEASHORE = 122,
+  BIRD_TWEET = 123,
+  TELEPHONE_RING = 124,
+  HELICOPTER = 125,
+  APPLAUSE = 126,
+  GUNSHOT = 127,
+}
+
+export enum InstrumentFamily {
+  PIANO = 0,
+  CHROMATIC_PERCUSSION = 1,
+  ORGAN = 2,
+  GUITAR = 3,
+  BASS = 4,
+  STRINGS = 5,
+  ENSEMBLE = 6,
+  BRASS = 7,
+  REED = 8,
+  PIPE = 9,
+  SYNTH_LEAD = 10,
+  SYNTH_PAD = 11,
+  SYNTH_EFFECTS = 12,
+  ETHNIC = 13,
+  PERCUSSIVE = 14,
+  SOUND_EFFECTS = 15,
+}
+
+export function getInstrumentFamily(instrument: Instrument): InstrumentFamily {
+  return instrument >> 3;
+}
+
 const MESSAGE_TYPE_MASK = 0xf0;
 const CHANNEL_MASK = 0x0f;
 const DATA_MASK = 0x7f;
@@ -285,6 +439,7 @@ export class MessageParser extends TypedEventTarget<MessageParserEvents> {
     const status = consume();
     let message: Message;
     switch (status & MESSAGE_TYPE_MASK) {
+      // TODO: Note on with velocity zero should be note off.
       case MessageType.NOTE_ON:
         message = new NoteOn(
           new Note(consume()),
@@ -339,6 +494,33 @@ function readUintN(view: DataView, offset: number): [number, number] {
   throw new Error(
     `Variable length quantity longer than four bytes at offset ${offset}`
   );
+}
+
+/**
+ * Writes a variable length quantity, returning an offset pointing to the first
+ * byte after the quantity.
+ */
+export function writeUintN(
+  view: DataView,
+  offset: number,
+  value: number
+): number {
+  if (value !== (value & 0xfffffff)) {
+    throw new Error(
+      `Variable length quantity out of range [0, ${0xfffffff}]: ${value}`
+    );
+  }
+  if (value > DATA_MASK << 14) {
+    view.setUint8(offset++, (value >> 21) | 0x80);
+  }
+  if (value > DATA_MASK << 7) {
+    view.setUint8(offset++, ((value >> 14) & DATA_MASK) | 0x80);
+  }
+  if (value > DATA_MASK) {
+    view.setUint8(offset++, ((value >> 7) & DATA_MASK) | 0x80);
+  }
+  view.setUint8(offset++, value & DATA_MASK);
+  return offset;
 }
 
 export enum TimeCode {
@@ -479,6 +661,17 @@ export class FileParser extends TypedEventTarget<{
           : ticks * this.secondsPerTick!,
       });
     });
+    messageParser.addEventListener('message', (e) => {
+      if (
+        e instanceof GenericMessage &&
+        e.messageType === MessageType.PROGRAM_CHANGE
+      ) {
+        console.log(
+          `Channel ${e.channel} instrument: ` +
+            `${Instrument[e.data[0]] ?? e.data.toHex()}`
+        );
+      }
+    });
 
     const tempoMapBuilder = TempoMap.builder(this.ticksPerQuarter!);
     const addTempo = (tempo: number) => tempoMapBuilder.addChange(ticks, tempo);
@@ -493,6 +686,7 @@ export class FileParser extends TypedEventTarget<{
       let status = chunk.getUint8(offset++);
       if (!(status & 0x80)) {
         // Running status
+        // TODO: Only kept for MIDI events (i.e. not sysex/meta)?
         if (lastStatus === null) {
           throw new Error(`Missing status byte in first event`);
         }
@@ -596,7 +790,9 @@ export class FileParser extends TypedEventTarget<{
       }
       case MetaEvent.KEY_SIGNATURE: {
         const key = keyFromNumSharps(data[0]);
-        console.log(`Key: ${keyLabel(key)} ${data[1] ? 'minor' : 'major'}`);
+        console.log(
+          `Key: ${keyLabel(key, key)} ${data[1] ? 'minor' : 'major'}`
+        );
         break;
       }
       case MetaEvent.TIME_SIGNATURE: {
