@@ -24,6 +24,7 @@ class KeyPress {
 
 export class Editor {
   private readonly elements = elementDeps({
+    body: HTMLBodyElement,
     melody: HTMLSelectElement,
     play: HTMLButtonElement,
     noteCanvas: HTMLCanvasElement,
@@ -93,6 +94,14 @@ export class Editor {
     this.elements.midiUploadInput.addEventListener('change', () =>
       this.onMidiUpload(this.elements.midiUploadInput.files?.item(0) ?? null)
     );
+    this.elements.body.addEventListener('keydown', (e) => {
+      switch (e.key) {
+        case ' ':
+          this.play();
+          e.preventDefault();
+          break;
+      }
+    });
 
     this.resizeCanvas();
     requestAnimationFrame((time) => this.draw(time));
@@ -200,6 +209,9 @@ export class Editor {
     });
     parser.parse();
     console.log(`Loaded melody with ${this.notes.length} notes`);
+
+    // Select the uploaded melody in the dropdown.
+    this.melodySelector.select(this.melodies[this.melodies.length - 1]);
   }
 
   private compileDrawnMelody(): Melody {

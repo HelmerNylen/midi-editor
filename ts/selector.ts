@@ -23,11 +23,36 @@ export class Selector<T> extends TypedEventTarget<{select: T | null}> {
     });
   }
 
+  select(option: T) {
+    const id = this.idFunc(option);
+    if (this.options.indexOf(option) === -1) {
+      throw new Error(
+        `Not an available option: ${option} (id: ${id}, label: ` +
+          `${this.labelFunc(option)})`
+      );
+    }
+    this.selectById(this.idFunc(option));
+  }
+
+  selectById(id: string): void {
+    for (const child of this.selectElement.children) {
+      if (child.getAttribute('value') === id) {
+        this.selectElement.value = id;
+        this.selectElement.dispatchEvent(new Event('change'));
+        return;
+      }
+    }
+    throw new Error(`Invalid option id: ${id}`);
+  }
+
   syncOptions(options?: readonly T[]) {
     this.options = options ?? this.options;
     const optionsById = new Map(
       Array.from(this.options, (option) => [this.idFunc(option), option])
     );
+    if (optionsById.size !== this.options.length) {
+      console.warn(`Selector received multiple options with the same ID`);
+    }
 
     // Remove or update stale existing elements.
     for (const child of Array.from(

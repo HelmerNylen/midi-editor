@@ -256,9 +256,24 @@ const DATA_MASK = 0x7f;
 const LSB_MASK_14_BIT = DATA_MASK;
 const MSB_MASK_14_BIT = DATA_MASK << 7;
 const CHANNEL_CONTROL_14_BIT_BLOCK = 0x3f;
+export const DEFAULT_NOTE_OFF_VELOCITY = 0x40;
 
 export interface Message {
   serialize(): Uint8Array;
+}
+
+export function checkValidData(
+  value: number,
+  descriptor = 'data byte',
+  mask = DATA_MASK
+) {
+  if (value !== (value & mask)) {
+    throw new Error(`Invalid ${descriptor}: ${value}`);
+  }
+}
+
+export function checkValidChannel(channel: number) {
+  checkValidData(channel, 'channel', CHANNEL_MASK);
 }
 
 export class NoteOn implements Message {
@@ -267,12 +282,8 @@ export class NoteOn implements Message {
     readonly velocity: number,
     readonly channel: number = 0
   ) {
-    if (velocity !== (velocity & DATA_MASK)) {
-      throw new Error(`Invalid velocity: ${velocity}`);
-    }
-    if (channel !== (channel & CHANNEL_MASK)) {
-      throw new Error(`Invalid channel: ${channel}`);
-    }
+    checkValidData(velocity, 'velocity');
+    checkValidChannel(channel);
   }
 
   serialize() {
@@ -287,15 +298,11 @@ export class NoteOn implements Message {
 export class NoteOff implements Message {
   constructor(
     readonly note: Note,
-    readonly velocity: number = 0,
+    readonly velocity: number = DEFAULT_NOTE_OFF_VELOCITY,
     readonly channel: number = 0
   ) {
-    if (velocity !== (velocity & DATA_MASK)) {
-      throw new Error(`Invalid velocity: ${velocity}`);
-    }
-    if (channel !== (channel & CHANNEL_MASK)) {
-      throw new Error(`Invalid channel: ${channel}`);
-    }
+    checkValidData(velocity, 'velocity');
+    checkValidChannel(channel);
   }
 
   serialize() {
@@ -315,18 +322,13 @@ export class ChannelControlMessage implements Message {
     data: number | boolean = 0,
     readonly channel: number = 0
   ) {
-    if (type !== (type & DATA_MASK)) {
-      throw new Error(`Invalid channel control message type: ${type}`);
-    }
+    checkValidData(type, 'channel control message type');
+    checkValidChannel(channel);
     if (typeof data === 'boolean') {
       this.data = data ? 0x7f : 0;
-    } else if (data !== (data & DATA_MASK)) {
-      throw new Error(`Invalid data: ${data}`);
     } else {
+      checkValidData(data);
       this.data = data;
-    }
-    if (channel !== (channel & CHANNEL_MASK)) {
-      throw new Error(`Invalid channel: ${channel}`);
     }
   }
 
@@ -437,18 +439,25 @@ export class MessageParser extends TypedEventTarget<MessageParserEvents> {
     };
 
     const status = consume();
-    let message: Message;
+    let message;
     switch (status & MESSAGE_TYPE_MASK) {
-      // TODO: Note on with velocity zero should be note off.
-      case MessageType.NOTE_ON:
-        message = new NoteOn(
-          new Note(consume()),
-          consume(),
-          status & CHANNEL_MASK
-        );
-        this.dispatchEvent('noteOn', message as NoteOn);
+      case MessageType.NOTE_ON: {
+        const note = new Note(consume());
+        const velocity = consume();
+        if (velocity > 0) {
+          message = new NoteOn(note, velocity, status & CHANNEL_MASK);
+          this.dispatchEvent('noteOn', message as NoteOn);
+        } else {
+          message = new NoteOff(
+            note,
+            DEFAULT_NOTE_OFF_VELOCITY,
+            status & CHANNEL_MASK
+          );
+          this.dispatchEvent('noteOff', message as NoteOff);
+        }
         break;
-      case MessageType.NOTE_OFF:
+      }
+      case MessageType.NOTE_OFF: {
         message = new NoteOff(
           new Note(consume()),
           consume(),
@@ -456,7 +465,8 @@ export class MessageParser extends TypedEventTarget<MessageParserEvents> {
         );
         this.dispatchEvent('noteOff', message as NoteOff);
         break;
-      case MessageType.CONTROL_CHANGE:
+      }
+      case MessageType.CONTROL_CHANGE: {
         message = new ChannelControlMessage(
           consume(),
           consume(),
@@ -464,7 +474,8 @@ export class MessageParser extends TypedEventTarget<MessageParserEvents> {
         );
         this.dispatchEvent('channelControl', message as ChannelControlMessage);
         break;
-      default:
+      }
+      default: {
         message = new GenericMessage(
           data instanceof Uint8Array
             ? data
@@ -472,6 +483,7 @@ export class MessageParser extends TypedEventTarget<MessageParserEvents> {
         );
         this.dispatchEvent('unmapped', message as GenericMessage);
         break;
+      }
     }
     this.dispatchEvent('message', message);
   }
@@ -631,19 +643,22 @@ export class FileParser extends TypedEventTarget<{
 
     let offset = 0;
     let ticks = 0;
-    let notesToLog = 3;
+    let notesToLog = 6;
     const pressed = new Map<number, {on: NoteOn; start: number}>();
     const messageParser = new MessageParser();
     messageParser.addEventListener('noteOn', (on: NoteOn) => {
       const press = {
         on,
+        // TODO: Tempo map not defined until the entire track has been processed
+        // for format 0.
         start: this.tempoMap
           ? this.tempoMap.ticksToSeconds(ticks)
           : ticks * this.secondsPerTick!,
       };
       if (notesToLog-- > 0) {
         console.log(
-          `Note ${on.note} pressed at ${ticks} ticks (${press.start} s)`
+          `Note ${on.note} pressed (v=${on.velocity}) at ${ticks} ticks ` +
+            `(${press.start} s)`
         );
       }
       pressed.set(on.note.byteValue, press);
@@ -652,6 +667,12 @@ export class FileParser extends TypedEventTarget<{
       const press = pressed.get(off.note.byteValue);
       if (!press) {
         return;
+      }
+      if (notesToLog-- > 0) {
+        console.log(
+          `Note ${off.note} released (v=${off.velocity}) at ${ticks} ticks ` +
+            `(${press.start} s)`
+        );
       }
       this.dispatchEvent('note', {
         ...press,
