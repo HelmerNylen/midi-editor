@@ -1,25 +1,25 @@
 'use strict';
 
-import {FileParser, NoteOff, NoteOn} from './message.js';
+import {FileParser} from './message.js';
 import {Note, NoteString} from './note.js';
 import {Player} from './player.js';
 import {PianoRenderer} from './rendering.js';
 import {Selector} from './selector.js';
+import {KeyPress, Span} from './song.js';
+import {TempoMap} from './tempo.js';
 import {elementDeps, sleep} from './utils.js';
 
-type Melody = Array<[Note | null, number]>;
+type Melody = Span[];
 
 const TOP_BAR_HEIGHT_PIXELS = 64;
 const PIANO_HEIGHT_PIXELS = 64;
-const GRID_SIZE = 5;
+const GRID_SIZE = 2;
 const KEY_GAP_COLOR = '#222';
+const DEFAULT_TEMPO_MAP = TempoMap.builder(96).build();
 
-class KeyPress {
-  constructor(
-    readonly start: number,
-    readonly duration: number,
-    readonly note: Note
-  ) {}
+interface EditorData {
+  spans: Span[];
+  tempo: TempoMap;
 }
 
 export class Editor {
@@ -41,7 +41,7 @@ export class Editor {
     chord,
     repeatedTone,
     repeatedChord,
-    this.compileDrawnMelody.bind(this),
+    (() => this.editorData.spans).bind(this),
   ];
   private melody = this.melodies[0];
   private readonly melodySelector = new Selector(
@@ -51,7 +51,10 @@ export class Editor {
     (melody) => melody.name[0].toUpperCase() + melody.name.substring(1)
   );
 
-  private notes: KeyPress[] = [];
+  private editorData: EditorData = {
+    spans: [],
+    tempo: DEFAULT_TEMPO_MAP,
+  };
   private moveStart: [number, number] | null = null;
   private drawContext = this.elements.noteCanvas.getContext('2d')!;
 
@@ -118,20 +121,23 @@ export class Editor {
   }
 
   async play() {
-    const melody = this.melody();
-    const duration = melody.reduce(
-      (sum, [note, length]) => (note === null ? sum + length : sum),
-      0
-    );
-    console.log(`Playing ${this.melody.name} (duration: ${duration / 1000} s)`);
+    const events = this.melody()
+      .flatMap((s) => [s.startEvent(), s.endEvent()])
+      .toSorted((a, b) => a.ticks - b.ticks);
+    const duration =
+      events.length > 0
+        ? this.editorData.tempo.ticksToSeconds(events[events.length - 1].ticks)
+        : 0;
+    console.log(`Playing melody with duration ${duration} s`);
 
-    for (const [note, length] of melody) {
-      if (note) {
-        this.player.send(new NoteOn(note, 95));
-        sleep(length).then(() => this.player.send(new NoteOff(note)));
-      } else {
-        await sleep(length);
+    for (let i = 0; i < events.length; i++) {
+      if (i > 0 && events[i - 1].ticks < events[i].ticks) {
+        const diffSeconds =
+          this.editorData.tempo.ticksToSeconds(events[i].ticks) -
+          this.editorData.tempo.ticksToSeconds(events[i - 1].ticks);
+        await sleep(diffSeconds * 1000);
       }
+      this.player.send(events[i].message);
     }
   }
 
@@ -148,15 +154,21 @@ export class Editor {
       const start =
         QUARTER *
         Math.round(Math.min(this.moveStart[1], e.offsetY) / GRID_SIZE);
-      const duration =
+      const end =
         QUARTER *
-          Math.max(
-            1,
-            Math.ceil(Math.max(this.moveStart[1], e.offsetY) / GRID_SIZE)
-          ) -
-        start;
-      this.notes.push(new KeyPress(start, duration, note));
-      console.log(`Added note ${note} at ${start} with length ${duration}`);
+        Math.max(
+          1,
+          Math.ceil(Math.max(this.moveStart[1], e.offsetY) / GRID_SIZE)
+        );
+      this.editorData.spans.push(
+        new KeyPress(
+          note,
+          95,
+          this.editorData.tempo.secondsToTicks(start),
+          this.editorData.tempo.secondsToTicks(end)
+        )
+      );
+      console.log(`Added note ${note} at ${start} with length ${end - start}`);
       this.moveStart = null;
       e.preventDefault();
     }
@@ -165,15 +177,16 @@ export class Editor {
   private onCanvasClick(e: PointerEvent) {
     if (e.button === 2) {
       const note = this.pianoRenderer.getNote(e.offsetX);
-      const time = e.offsetY / GRID_SIZE;
-      const index = this.notes.findIndex(
+      const ticks = this.editorData.tempo.secondsToTicks(e.offsetY / GRID_SIZE);
+      const index = this.editorData.spans.findIndex(
         (k) =>
+          k instanceof KeyPress &&
           k.note.byteValue === note.byteValue &&
-          k.start <= time &&
-          time <= k.start + k.duration
+          k.start <= ticks &&
+          ticks <= k.start + k.duration
       );
       if (index !== -1) {
-        this.notes.splice(index, 1);
+        this.editorData.spans.splice(index, 1);
       }
       e.preventDefault();
     }
@@ -197,36 +210,26 @@ export class Editor {
     });
 
     const parser = new FileParser(buffer);
-    this.notes = [];
-    let notesToLog = 3;
-    parser.addEventListener('note', ({on, start, stop}) => {
-      if (notesToLog-- > 0) {
-        console.log(`Note ${on.note} at ${start} with length ${stop - start}`);
-      }
-      this.notes.push(
-        new KeyPress(start * 1000, (stop - start) * 1000, on.note)
-      );
+    this.editorData = {spans: [], tempo: DEFAULT_TEMPO_MAP};
+    parser.addEventListener('span', (span) => this.editorData.spans.push(span));
+    parser.addEventListener('tempo', (tempo) => {
+      this.editorData.tempo = tempo;
     });
     parser.parse();
-    console.log(`Loaded melody with ${this.notes.length} notes`);
+    const numNotes = this.editorData.spans.filter(
+      (s) => s instanceof KeyPress
+    ).length;
+    console.log(`Loaded melody with ${numNotes} notes`);
+    for (let i = 0; i < 3; i++) {
+      const span = this.editorData.spans[i];
+      const startSeconds = this.editorData.tempo.ticksToSeconds(span.start);
+      const endSeconds = this.editorData.tempo.ticksToSeconds(span.end);
+      const label = span instanceof KeyPress ? span.note.toString() : 'other';
+      console.log(`Span #${i}: ${label} ${startSeconds} s to ${endSeconds} s`);
+    }
 
     // Select the uploaded melody in the dropdown.
     this.melodySelector.select(this.melodies[this.melodies.length - 1]);
-  }
-
-  private compileDrawnMelody(): Melody {
-    const result: Melody = [];
-    let last: KeyPress | null = null;
-    for (const keyPress of this.notes.toSorted((a, b) => a.start - b.start)) {
-      const gap = keyPress.start - (last?.start ?? 0);
-      if (gap > 0) {
-        result.push([null, gap]);
-      }
-      result.push([keyPress.note, keyPress.duration]);
-      last = keyPress;
-    }
-
-    return result;
   }
 
   private draw(_: DOMHighResTimeStamp) {
@@ -245,10 +248,15 @@ export class Editor {
     this.pianoRenderer.drawPedalsTo(this.drawContext, 0, pianoStartY);
 
     this.drawContext.fillStyle = 'salmon';
-    for (const keyPress of this.notes) {
-      const [x0, x1] = this.pianoRenderer.getNoteCoords(keyPress.note);
-      const y = (keyPress.start * GRID_SIZE) / QUARTER;
-      const h = (keyPress.duration * GRID_SIZE) / QUARTER;
+    for (const span of this.editorData.spans) {
+      if (!('note' in span)) {
+        continue;
+      }
+      const [x0, x1] = this.pianoRenderer.getNoteCoords(
+        (span as KeyPress).note
+      );
+      const y = (span.start * GRID_SIZE) / QUARTER;
+      const h = (span.duration * GRID_SIZE) / QUARTER;
       this.drawContext.fillRect(x0, y, x1 - x0, h);
     }
 
@@ -257,16 +265,28 @@ export class Editor {
   }
 }
 
-const BPM = 120;
-const FULL = (4 * 60000) / BPM;
-const HALF = FULL / 2;
-const QUARTER = FULL / 4;
-const EIGHTH = FULL / 8;
+const QUARTER = DEFAULT_TEMPO_MAP.ticksPerQuarter;
+const HALF = QUARTER * 2;
+const FULL = QUARTER * 4;
+const EIGHTH = QUARTER / 2;
 const n = (strings: TemplateStringsArray) =>
   Note.fromString(strings[0] as NoteString);
+const compileMelody = (notes: Array<[Note | null, number]>) => {
+  const result: Melody = [];
+  let start = 0;
+  for (const [note, length] of notes) {
+    if (note === null) {
+      start += length;
+      continue;
+    }
+    result.push(new KeyPress(note, 95, start, start + length));
+  }
+
+  return result;
+};
 
 function shoreline(): Melody {
-  return [
+  return compileMelody([
     [n`G3`, FULL],
     [n`Bb3`, FULL],
     [n`D4`, FULL],
@@ -346,23 +366,23 @@ function shoreline(): Melody {
     [n`A3`, EIGHTH],
     [n`C4`, EIGHTH],
     [null, EIGHTH],
-  ];
+  ]);
 }
 
 function tone(): Melody {
-  return [
+  return compileMelody([
     [n`A4`, FULL],
     [null, FULL],
-  ];
+  ]);
 }
 
 function chord(): Melody {
-  return [
+  return compileMelody([
     [n`A4`, FULL],
     [n`Db5`, FULL],
     [n`E5`, FULL],
     [null, FULL],
-  ];
+  ]);
 }
 
 function repeatedTone(): Melody {
@@ -370,7 +390,7 @@ function repeatedTone(): Melody {
     [n`A4`, QUARTER],
     [null, QUARTER],
   ];
-  return new Array(8).fill(singleTone).flat();
+  return compileMelody(new Array(8).fill(singleTone).flat());
 }
 
 function repeatedChord(): Melody {
@@ -380,13 +400,15 @@ function repeatedChord(): Melody {
     [n`E5`, QUARTER],
     [null, QUARTER],
   ];
-  return new Array(8).fill(singleChord).flat();
+  return compileMelody(new Array(8).fill(singleChord).flat());
 }
 
 function scale(): Melody {
   const notes = [n`C4`, n`D4`, n`E4`, n`F4`, n`G4`, n`A4`, n`B4`, n`C5`];
-  return Array.from(notes.concat(notes.toReversed().slice(1)), (note) => [
-    [note, QUARTER],
-    [null, QUARTER],
-  ]).flat() as Melody;
+  return compileMelody(
+    Array.from(notes.concat(notes.toReversed().slice(1)), (note) => [
+      [note, QUARTER],
+      [null, QUARTER],
+    ]).flat() as Array<[Note | null, number]>
+  );
 }

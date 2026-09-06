@@ -2,6 +2,7 @@
 
 import {TypedEventTarget} from './event.js';
 import {keyFromNumSharps, keyLabel, Note} from './note.js';
+import {Event, KeyPress, Span, Switch} from './song.js';
 import {TempoMap} from './tempo.js';
 
 // See https://midi.org/summary-of-midi-1-0-messages or
@@ -276,6 +277,23 @@ export function checkValidChannel(channel: number) {
   checkValidData(channel, 'channel', CHANNEL_MASK);
 }
 
+export function isChannelControlSwitch(
+  type: ChannelControlType
+): type is ChannelControlSwitch {
+  switch (type) {
+    case ChannelControlType.SUSTAIN:
+    case ChannelControlType.PORTAMENTO:
+    case ChannelControlType.SOSTENUTO:
+    case ChannelControlType.SOFT:
+    case ChannelControlType.LEGATO:
+    case ChannelControlType.HOLD_2:
+    case ChannelControlType.LOCAL_CONTROL:
+      return true;
+    default:
+      return false;
+  }
+}
+
 export class NoteOn implements Message {
   constructor(
     readonly note: Note,
@@ -292,6 +310,10 @@ export class NoteOn implements Message {
       this.note.byteValue,
       this.velocity
     );
+  }
+
+  getNoteOff(velocity: number = DEFAULT_NOTE_OFF_VELOCITY): NoteOff {
+    return new NoteOff(this.note, velocity, this.channel);
   }
 }
 
@@ -548,8 +570,12 @@ const FPS_BY_TIME_CODE = new Map([
   [TimeCode.FPS_30_DROP, 29.97],
 ]);
 
+const CHUNK_TYPE_LENGTH = 4;
+const CHUNK_HEADER_LENGTH = 8;
+
 export class FileParser extends TypedEventTarget<{
-  note: {on: NoteOn; off: NoteOff; start: number; stop: number};
+  span: Span;
+  tempo: TempoMap;
 }> {
   private view: DataView;
   private asciiDecoder = new TextDecoder('ascii', {
@@ -569,19 +595,23 @@ export class FileParser extends TypedEventTarget<{
 
   parse() {
     let offset = 0;
-    while (offset + 8 < this.buffer.byteLength) {
+    while (offset + CHUNK_HEADER_LENGTH < this.buffer.byteLength) {
       const type = this.asciiDecoder.decode(
-        this.buffer.slice(offset, offset + 4)
+        this.buffer.slice(offset, offset + CHUNK_TYPE_LENGTH)
       );
-      const length = this.view.getUint32(offset + 4);
-      if (offset + 8 + length > this.buffer.byteLength) {
+      const length = this.view.getUint32(offset + CHUNK_TYPE_LENGTH);
+      const chunkEnd = offset + CHUNK_HEADER_LENGTH + length;
+      if (chunkEnd > this.buffer.byteLength) {
         throw new Error(
           `Chunk of type ${type} at offset ${offset} ends at ` +
-            `${offset + 8 + length}, but the file is only ` +
-            `${this.buffer.byteLength} long`
+            `${chunkEnd}, but the file is only ${this.buffer.byteLength} long`
         );
       }
-      const content = new DataView(this.buffer, offset + 8, length);
+      const content = new DataView(
+        this.buffer,
+        offset + CHUNK_HEADER_LENGTH,
+        length
+      );
 
       switch (type) {
         case 'MThd':
@@ -595,7 +625,7 @@ export class FileParser extends TypedEventTarget<{
           break;
       }
 
-      offset += 8 + length;
+      offset += CHUNK_HEADER_LENGTH + length;
     }
   }
 
@@ -643,53 +673,92 @@ export class FileParser extends TypedEventTarget<{
 
     let offset = 0;
     let ticks = 0;
-    let notesToLog = 6;
-    const pressed = new Map<number, {on: NoteOn; start: number}>();
+    const spans = new Array<Span<Message, Message>>();
+    const spanStarts = new Map<number, Event<Message>>();
+
     const messageParser = new MessageParser();
-    messageParser.addEventListener('noteOn', (on: NoteOn) => {
-      const press = {
-        on,
-        // TODO: Tempo map not defined until the entire track has been processed
-        // for format 0.
-        start: this.tempoMap
-          ? this.tempoMap.ticksToSeconds(ticks)
-          : ticks * this.secondsPerTick!,
-      };
-      if (notesToLog-- > 0) {
-        console.log(
-          `Note ${on.note} pressed (v=${on.velocity}) at ${ticks} ticks ` +
-            `(${press.start} s)`
+    messageParser.addEventListener('noteOn', (message: NoteOn) => {
+      const key = KeyPress.getSpanKey(message);
+      const existing = spanStarts.get(key) as Event<NoteOn>;
+      if (existing) {
+        console.warn(
+          `Note already pressed: ${message.note} (ch ${message.channel}, ` +
+            `${ticks} t)`
+        );
+        spans.push(
+          KeyPress.create(existing, {
+            ticks,
+            message: existing.message.getNoteOff(),
+          })
         );
       }
-      pressed.set(on.note.byteValue, press);
+      spanStarts.set(key, {ticks, message});
     });
-    messageParser.addEventListener('noteOff', (off) => {
-      const press = pressed.get(off.note.byteValue);
-      if (!press) {
+    messageParser.addEventListener('noteOff', (message: NoteOff) => {
+      const key = KeyPress.getSpanKey(message);
+      const noteOnEvent = spanStarts.get(key) as Event<NoteOn>;
+      if (!noteOnEvent) {
+        console.warn(
+          `Note not pressed: ${message.note} (ch ${message.channel}, ` +
+            `${ticks} t)`
+        );
         return;
       }
-      if (notesToLog-- > 0) {
-        console.log(
-          `Note ${off.note} released (v=${off.velocity}) at ${ticks} ticks ` +
-            `(${press.start} s)`
-        );
-      }
-      this.dispatchEvent('note', {
-        ...press,
-        off,
-        stop: this.tempoMap
-          ? this.tempoMap.ticksToSeconds(ticks)
-          : ticks * this.secondsPerTick!,
-      });
+      spanStarts.delete(key);
+      spans.push(KeyPress.create(noteOnEvent, {ticks, message}));
     });
-    messageParser.addEventListener('message', (e) => {
+    messageParser.addEventListener('channelControl', (message) => {
+      // If isStart would return false, typescript assumes the message cannot be
+      // a ChannelControlMessage. Cast to boolean to remove the type narrowing
+      // to 'never'.
+      if (Switch.isStart(message) as boolean) {
+        const key = Switch.getSpanKey(message);
+        const existing = spanStarts.get(key) as Event<ChannelControlMessage>;
+        if (existing) {
+          console.warn(
+            `Switch already pressed: ${ChannelControlType[message.type]} ` +
+              `(ch ${message.channel}, ${ticks} t)`
+          );
+          spans.push(
+            Switch.create(existing, {
+              ticks,
+              message: new ChannelControlMessage(
+                existing.message.type,
+                false,
+                existing.message.channel
+              ),
+            })
+          );
+        }
+        spanStarts.set(key, {ticks, message});
+        return;
+      }
+
+      if (Switch.isEnd(message)) {
+        const key = Switch.getSpanKey(message);
+        const switchOnEvent = spanStarts.get(
+          key
+        ) as Event<ChannelControlMessage>;
+        if (!switchOnEvent) {
+          console.warn(
+            `Switch not pressed: ${ChannelControlType[message.type]} ` +
+              `(ch ${message.channel}, ${ticks} t)`
+          );
+          return;
+        }
+
+        spanStarts.delete(key);
+        spans.push(Switch.create(switchOnEvent, {ticks, message}));
+      }
+    });
+    messageParser.addEventListener('unmapped', (message) => {
       if (
-        e instanceof GenericMessage &&
-        e.messageType === MessageType.PROGRAM_CHANGE
+        message instanceof GenericMessage &&
+        message.messageType === MessageType.PROGRAM_CHANGE
       ) {
         console.log(
-          `Channel ${e.channel} instrument: ` +
-            `${Instrument[e.data[0]] ?? e.data.toHex()}`
+          `Channel ${message.channel} instrument: ` +
+            `${Instrument[message.data[0]] ?? message.data.toHex()}`
         );
       }
     });
@@ -745,6 +814,15 @@ export class FileParser extends TypedEventTarget<{
     if (tempoMapBuilder.length && !this.tempoMap) {
       // TODO: Format 2 files may have different tempos for different tracks.
       this.tempoMap = tempoMapBuilder.build();
+      this.dispatchEvent('tempo', this.tempoMap);
+    }
+
+    if (spanStarts.size !== 0) {
+      console.warn(`Unfinished spans on track end: ${spanStarts.size}`);
+    }
+    // Emit notes for the placeholder playback.
+    for (const span of spans) {
+      this.dispatchEvent('span', span);
     }
   }
 
