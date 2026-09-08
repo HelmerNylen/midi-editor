@@ -31,7 +31,7 @@ export class Song {
   }
 }
 
-interface TimingInfo {
+export interface TimingInfo {
   supportsTempoChanges: boolean;
 
   secondsToTicks(seconds: number): number;
@@ -39,7 +39,7 @@ interface TimingInfo {
   getDivision(): Uint8Array;
 }
 
-const INCONCLUSIVE: unique symbol = Symbol('INCONCLUSIVE');
+export const INCONCLUSIVE: unique symbol = Symbol('INCONCLUSIVE');
 
 export class Track {
   channel: number | typeof INCONCLUSIVE = INCONCLUSIVE;
@@ -53,6 +53,7 @@ export class Track {
 
   serialize(): ArrayBuffer {
     // TODO: Add events for name, sequence number etc.
+    // TODO: Consider emitting channel control switch off messages at t = 0.
     const events = this.events
       .concat(this.spans.map((span) => span.startEvent()))
       .concat(this.spans.map((span) => span.endEvent()));

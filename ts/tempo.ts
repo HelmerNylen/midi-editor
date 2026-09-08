@@ -7,16 +7,22 @@ export interface TempoMapBuilder {
 }
 
 export class TempoMap {
+  readonly supportsTempoChanges = true;
+
   private constructor(
     readonly ticksPerQuarter: number,
     private readonly tempoChanges: TempoChange[]
   ) {}
 
-  static builder(ticksPerQuarter: number): TempoMapBuilder {
+  static builder(ticksPerQuarter: number, log = false): TempoMapBuilder {
+    // TODO: Could use checkValidData if not for circular imports.
     if (!(ticksPerQuarter > 0)) {
       throw new Error(
         `Ticks per quarter must be positive, got: ${ticksPerQuarter}`
       );
+    }
+    if (ticksPerQuarter !== (ticksPerQuarter & 0x7fff)) {
+      throw new Error(`Ticks per quarter must fit in 15 bit integer`);
     }
 
     const tempoChanges: TempoChange[] = [];
@@ -46,9 +52,12 @@ export class TempoMap {
           seconds,
           microsecondsPerQuarter
         );
-        console.log(
-          `Tempo at ${seconds} s: ${60000000 / microsecondsPerQuarter} BPM`
-        );
+
+        if (log) {
+          console.log(
+            `Tempo at ${seconds} s: ${60000000 / microsecondsPerQuarter} BPM`
+          );
+        }
 
         if (deltaQuarters === 0 && tempoChanges.length) {
           console.warn(
@@ -61,10 +70,12 @@ export class TempoMap {
         return this;
       },
       build() {
-        console.log(
-          `Built tempo map with ${tempoChanges.length} changes:`,
-          tempoChanges
-        );
+        if (log) {
+          console.log(
+            `Built tempo map with ${tempoChanges.length} changes:`,
+            tempoChanges
+          );
+        }
         return new TempoMap(ticksPerQuarter, tempoChanges);
       },
       get length() {
@@ -100,6 +111,13 @@ export class TempoMap {
       (1e6 * (seconds - relevantTempoChange.seconds)) /
       relevantTempoChange.microsecondsPerQuarter;
     return relevantTempoChange.ticks + deltaQuarters * this.ticksPerQuarter;
+  }
+
+  getDivision(): Uint8Array {
+    return new Uint8Array([
+      (this.ticksPerQuarter >> 8) & 0x7f,
+      this.ticksPerQuarter & 0xff,
+    ]);
   }
 }
 

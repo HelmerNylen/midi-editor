@@ -2,8 +2,8 @@
 
 import {TypedEventTarget} from './event.js';
 import {keyFromNumSharps, keyLabel, Note} from './note.js';
-import {Event, KeyPress, Span, Switch} from './song.js';
-import {TempoMap} from './tempo.js';
+import {Event, INCONCLUSIVE, KeyPress, Song, Switch, Track} from './song.js';
+import {TempoMap, TempoMapBuilder} from './tempo.js';
 
 // See https://midi.org/summary-of-midi-1-0-messages or
 // https://midimusic.github.io/tech/midispec.html or
@@ -573,10 +573,7 @@ const FPS_BY_TIME_CODE = new Map([
 const CHUNK_TYPE_LENGTH = 4;
 const CHUNK_HEADER_LENGTH = 8;
 
-export class FileParser extends TypedEventTarget<{
-  span: Span;
-  tempo: TempoMap;
-}> {
+export class FileParser {
   private view: DataView;
   private asciiDecoder = new TextDecoder('ascii', {
     fatal: true,
@@ -584,16 +581,15 @@ export class FileParser extends TypedEventTarget<{
   });
   private ticksPerQuarter?: number;
   private secondsPerTick?: number;
-
-  private tempoEventEmitter = new TypedEventTarget<{tempo: number}>();
   private tempoMap?: TempoMap;
 
   constructor(private buffer: ArrayBuffer) {
-    super();
     this.view = new DataView(buffer);
   }
 
-  parse() {
+  parse(): Song {
+    const tracks: Track[] = [];
+
     let offset = 0;
     while (offset + CHUNK_HEADER_LENGTH < this.buffer.byteLength) {
       const type = this.asciiDecoder.decode(
@@ -617,9 +613,20 @@ export class FileParser extends TypedEventTarget<{
         case 'MThd':
           this.readHeader(content);
           break;
-        case 'MTrk':
-          this.readTrack(content);
+        case 'MTrk': {
+          const {track, tempoMap} = new TrackParser(
+            content,
+            this.asciiDecoder,
+            this.ticksPerQuarter
+          ).parse();
+          // TODO: Format 2 files may have different tempos for different
+          // tracks.
+          if (!this.tempoMap && tempoMap) {
+            this.tempoMap = tempoMap;
+          }
+          tracks.push(track);
           break;
+        }
         default:
           console.log(`Unknown chunk type ${type} with length ${length}`);
           break;
@@ -627,6 +634,18 @@ export class FileParser extends TypedEventTarget<{
 
       offset += CHUNK_HEADER_LENGTH + length;
     }
+
+    if (!this.tempoMap) {
+      if (!this.ticksPerQuarter) {
+        throw new Error(`No tempo map found (SMPTE not supported)`);
+      }
+      // Default tempo map.
+      this.tempoMap = TempoMap.builder(this.ticksPerQuarter).build();
+    }
+
+    const song = new Song(this.tempoMap!);
+    song.tracks.splice(0, 0, ...tracks);
+    return song;
   }
 
   private readHeader(chunk: DataView) {
@@ -667,113 +686,165 @@ export class FileParser extends TypedEventTarget<{
 
     console.log(`Format ${format}, ${numTracks} tracks`);
   }
+}
 
-  private readTrack(chunk: DataView) {
-    console.log(`Reading track with size ${chunk.byteLength} bytes`);
+class TrackParser {
+  private readonly track = new Track();
+  private readonly messageParser = new MessageParser();
+  private readonly spanStarts = new Map<number, Event<Message>>();
+  private readonly instrumentsByChannel = new Map<
+    number,
+    Instrument | typeof INCONCLUSIVE
+  >();
+  private readonly tempoMapBuilder?: TempoMapBuilder;
 
-    let offset = 0;
-    let ticks = 0;
-    const spans = new Array<Span<Message, Message>>();
-    const spanStarts = new Map<number, Event<Message>>();
+  private didParse = false;
+  private byteOffset = 0;
+  private ticks = 0;
 
-    const messageParser = new MessageParser();
-    messageParser.addEventListener('noteOn', (message: NoteOn) => {
-      const key = KeyPress.getSpanKey(message);
-      const existing = spanStarts.get(key) as Event<NoteOn>;
-      if (existing) {
+  constructor(
+    private readonly chunk: DataView,
+    private readonly decoder: TextDecoder,
+    ticksPerQuarter?: number
+  ) {
+    if (ticksPerQuarter !== undefined) {
+      this.tempoMapBuilder = TempoMap.builder(ticksPerQuarter);
+    }
+
+    this.messageParser.addEventListener('noteOn', this.onNoteOn.bind(this));
+    this.messageParser.addEventListener('noteOff', this.onNoteOff.bind(this));
+    this.messageParser.addEventListener(
+      'channelControl',
+      this.onChannelControl.bind(this)
+    );
+    this.messageParser.addEventListener('unmapped', this.onUnmapped.bind(this));
+  }
+
+  private onNoteOn(message: NoteOn) {
+    const key = KeyPress.getSpanKey(message);
+    const existing = this.spanStarts.get(key) as Event<NoteOn>;
+    if (existing) {
+      console.warn(
+        `Note already pressed: ${message.note} (ch ${message.channel}, ` +
+          `${this.ticks} t)`
+      );
+      this.track.spans.push(
+        KeyPress.create(existing, {
+          ticks: this.ticks,
+          message: existing.message.getNoteOff(),
+        })
+      );
+    }
+    this.spanStarts.set(key, {ticks: this.ticks, message});
+    this.instrumentsByChannel.getOrInsert(message.channel, INCONCLUSIVE);
+  }
+
+  private onNoteOff(message: NoteOff) {
+    const key = KeyPress.getSpanKey(message);
+    const noteOnEvent = this.spanStarts.get(key) as Event<NoteOn>;
+    if (!noteOnEvent) {
+      console.warn(
+        `Note not pressed: ${message.note} (ch ${message.channel}, ` +
+          `${this.ticks} t)`
+      );
+      return;
+    }
+    this.spanStarts.delete(key);
+    this.track.spans.push(
+      KeyPress.create(noteOnEvent, {ticks: this.ticks, message})
+    );
+  }
+
+  private onSwitchEnable(message: ChannelControlMessage) {
+    const key = Switch.getSpanKey(message);
+    const existing = this.spanStarts.get(key) as Event<ChannelControlMessage>;
+    if (existing) {
+      console.warn(
+        `Switch already pressed: ${ChannelControlType[message.type]} ` +
+          `(ch ${message.channel}, ${this.ticks} t)`
+      );
+      this.track.spans.push(
+        Switch.create(existing, {
+          ticks: this.ticks,
+          message: new ChannelControlMessage(
+            existing.message.type,
+            false,
+            existing.message.channel
+          ),
+        })
+      );
+    }
+    this.spanStarts.set(key, {ticks: this.ticks, message});
+  }
+
+  private onSwitchDisable(message: ChannelControlMessage) {
+    const key = Switch.getSpanKey(message);
+    const switchOnEvent = this.spanStarts.get(
+      key
+    ) as Event<ChannelControlMessage>;
+    if (!switchOnEvent) {
+      if (this.ticks > 0) {
         console.warn(
-          `Note already pressed: ${message.note} (ch ${message.channel}, ` +
-            `${ticks} t)`
-        );
-        spans.push(
-          KeyPress.create(existing, {
-            ticks,
-            message: existing.message.getNoteOff(),
-          })
+          `Switch not pressed: ${ChannelControlType[message.type]} ` +
+            `(ch ${message.channel}, ${this.ticks} t)`
         );
       }
-      spanStarts.set(key, {ticks, message});
-    });
-    messageParser.addEventListener('noteOff', (message: NoteOff) => {
-      const key = KeyPress.getSpanKey(message);
-      const noteOnEvent = spanStarts.get(key) as Event<NoteOn>;
-      if (!noteOnEvent) {
-        console.warn(
-          `Note not pressed: ${message.note} (ch ${message.channel}, ` +
-            `${ticks} t)`
-        );
-        return;
-      }
-      spanStarts.delete(key);
-      spans.push(KeyPress.create(noteOnEvent, {ticks, message}));
-    });
-    messageParser.addEventListener('channelControl', (message) => {
-      // If isStart would return false, typescript assumes the message cannot be
-      // a ChannelControlMessage. Cast to boolean to remove the type narrowing
-      // to 'never'.
-      if (Switch.isStart(message) as boolean) {
-        const key = Switch.getSpanKey(message);
-        const existing = spanStarts.get(key) as Event<ChannelControlMessage>;
-        if (existing) {
-          console.warn(
-            `Switch already pressed: ${ChannelControlType[message.type]} ` +
-              `(ch ${message.channel}, ${ticks} t)`
-          );
-          spans.push(
-            Switch.create(existing, {
-              ticks,
-              message: new ChannelControlMessage(
-                existing.message.type,
-                false,
-                existing.message.channel
-              ),
-            })
-          );
+      return;
+    }
+
+    this.spanStarts.delete(key);
+    this.track.spans.push(
+      Switch.create(switchOnEvent, {ticks: this.ticks, message})
+    );
+  }
+
+  private onChannelControl(message: ChannelControlMessage) {
+    // If isStart would return false, typescript assumes the message cannot be a
+    // ChannelControlMessage. Cast to boolean to remove the type narrowing to
+    // 'never'.
+    if (Switch.isStart(message) as boolean) {
+      this.onSwitchEnable(message);
+    } else if (Switch.isEnd(message)) {
+      this.onSwitchDisable(message);
+    }
+  }
+
+  private onUnmapped(message: GenericMessage) {
+    if (message.messageType === MessageType.PROGRAM_CHANGE) {
+      const currentInstrument = this.instrumentsByChannel.get(message.channel);
+      if (currentInstrument !== undefined) {
+        if (
+          currentInstrument !== message.data[0] &&
+          currentInstrument !== INCONCLUSIVE
+        ) {
+          // Multiple different instruments on the same channel, or already
+          // inconclusive, or a note on event was received before the instrument
+          // was specified.
+          console.warn(`Inconclusive instrument on channel ${message.channel}`);
+          this.instrumentsByChannel.set(message.channel, INCONCLUSIVE);
         }
-        spanStarts.set(key, {ticks, message});
-        return;
+      } else {
+        // Instrument specified before any note on events.
+        this.instrumentsByChannel.set(message.channel, message.data[0]);
       }
+    }
+    this.track.events.push({ticks: this.ticks, message});
+  }
 
-      if (Switch.isEnd(message)) {
-        const key = Switch.getSpanKey(message);
-        const switchOnEvent = spanStarts.get(
-          key
-        ) as Event<ChannelControlMessage>;
-        if (!switchOnEvent) {
-          console.warn(
-            `Switch not pressed: ${ChannelControlType[message.type]} ` +
-              `(ch ${message.channel}, ${ticks} t)`
-          );
-          return;
-        }
-
-        spanStarts.delete(key);
-        spans.push(Switch.create(switchOnEvent, {ticks, message}));
-      }
-    });
-    messageParser.addEventListener('unmapped', (message) => {
-      if (
-        message instanceof GenericMessage &&
-        message.messageType === MessageType.PROGRAM_CHANGE
-      ) {
-        console.log(
-          `Channel ${message.channel} instrument: ` +
-            `${Instrument[message.data[0]] ?? message.data.toHex()}`
-        );
-      }
-    });
-
-    const tempoMapBuilder = TempoMap.builder(this.ticksPerQuarter!);
-    const addTempo = (tempo: number) => tempoMapBuilder.addChange(ticks, tempo);
-    this.tempoEventEmitter.addEventListener('tempo', addTempo);
+  parse(): {track: Track; tempoMap: TempoMap | undefined} {
+    if (this.didParse) {
+      throw new Error('Track parsers are single use');
+    }
+    this.didParse = true;
+    console.log(`Reading track with size ${this.chunk.byteLength} bytes`);
 
     let lastStatus = null;
-    while (offset < chunk.byteLength) {
+    while (this.byteOffset < this.chunk.byteLength) {
       let delta;
-      [delta, offset] = readUintN(chunk, offset);
-      ticks += delta;
+      [delta, this.byteOffset] = readUintN(this.chunk, this.byteOffset);
+      this.ticks += delta;
 
-      let status = chunk.getUint8(offset++);
+      let status = this.chunk.getUint8(this.byteOffset++);
       if (!(status & 0x80)) {
         // Running status
         // TODO: Only kept for MIDI events (i.e. not sysex/meta)?
@@ -787,22 +858,24 @@ export class FileParser extends TypedEventTarget<{
 
       switch (status & MESSAGE_TYPE_MASK) {
         case MessageType.SYSTEM_COMMON: {
-          offset = this.handleSysex(chunk, offset, status);
+          this.handleSysex(status);
           break;
         }
         case MessageType.PROGRAM_CHANGE:
         case MessageType.CHANNEL_PRESSURE: {
           // Parse MIDI event of length 2.
-          messageParser.send(Uint8Array.of(status, chunk.getUint8(offset++)));
+          this.messageParser.send(
+            Uint8Array.of(status, this.chunk.getUint8(this.byteOffset++))
+          );
           break;
         }
         default: {
           // Parse MIDI event of length 3.
-          messageParser.send(
+          this.messageParser.send(
             Uint8Array.of(
               status,
-              chunk.getUint8(offset++),
-              chunk.getUint8(offset++)
+              this.chunk.getUint8(this.byteOffset++),
+              this.chunk.getUint8(this.byteOffset++)
             )
           );
           break;
@@ -810,81 +883,114 @@ export class FileParser extends TypedEventTarget<{
       }
     }
 
-    this.tempoEventEmitter.removeEventListener('tempo', addTempo);
-    if (tempoMapBuilder.length && !this.tempoMap) {
-      // TODO: Format 2 files may have different tempos for different tracks.
-      this.tempoMap = tempoMapBuilder.build();
-      this.dispatchEvent('tempo', this.tempoMap);
+    if (this.spanStarts.size !== 0) {
+      console.warn(`Unfinished spans on track end: ${this.spanStarts.size}`);
     }
 
-    if (spanStarts.size !== 0) {
-      console.warn(`Unfinished spans on track end: ${spanStarts.size}`);
+    if (this.instrumentsByChannel.size === 1) {
+      [this.track.channel] = this.instrumentsByChannel.keys();
+      [this.track.instrument] = this.instrumentsByChannel.values();
+      console.log(
+        `Track ${this.track.name ?? '<no track name>'} on channel ` +
+          `${String(this.track.channel)} has instrument ` +
+          (this.track.instrument === INCONCLUSIVE
+            ? 'inconclusive'
+            : Instrument[this.track.instrument]) +
+          (this.track.instrumentName ? ` (${this.track.instrumentName})` : '')
+      );
     }
-    // Emit notes for the placeholder playback.
-    for (const span of spans) {
-      this.dispatchEvent('span', span);
-    }
+
+    const tempoMap = this.tempoMapBuilder?.length
+      ? this.tempoMapBuilder?.build()
+      : undefined;
+    return {track: this.track, tempoMap};
   }
 
-  private handleSysex(chunk: DataView, offset: number, status: number): number {
+  private handleSysex(status: number) {
     switch (status) {
-      case SystemMessage.SYSTEM_EXCLUSIVE: {
-        while (chunk.getUint8(offset++) !== SystemMessage.END_OF_EXCLUSIVE) {
-          // Skip over message.
-        }
-        break;
-      }
+      case SystemMessage.SYSTEM_EXCLUSIVE:
       case SystemMessage.END_OF_EXCLUSIVE: {
+        // System exclusive: F0 <len> <len - 1 bytes of data> F7
+        //               or: F7 <len> <len bytes of data>
         let length;
-        [length, offset] = readUintN(chunk, offset);
+        [length, this.byteOffset] = readUintN(this.chunk, this.byteOffset);
         // Skip over message.
-        offset += length;
+        this.byteOffset += length;
+        if (
+          status === SystemMessage.SYSTEM_EXCLUSIVE &&
+          (length === 0 ||
+            this.chunk.getUint8(this.byteOffset - 1) !==
+              SystemMessage.END_OF_EXCLUSIVE)
+        ) {
+          console.warn(
+            `0xF0 system message at offset ${this.byteOffset - length - 1} ` +
+              `missing trailing 0xF7 at offset ${this.byteOffset - 1}`,
+            this.chunk
+          );
+        }
         break;
       }
       case SystemMessage.RESET: {
         // Meta event: FF <event type> <len> <len bytes of data>
-        const metaEventType = chunk.getUint8(offset);
-        const dataLength = chunk.getUint8(offset + 1);
+        const metaEventType = this.chunk.getUint8(this.byteOffset++);
+        let length;
+        [length, this.byteOffset] = readUintN(this.chunk, this.byteOffset);
         const data = new Uint8Array(
-          chunk.buffer,
-          chunk.byteOffset + offset + 2,
-          dataLength
+          this.chunk.buffer,
+          this.chunk.byteOffset + this.byteOffset,
+          length
         );
+        this.byteOffset += length;
         this.handleMeta(metaEventType, data);
-        offset += dataLength + 2;
         break;
       }
+      // TODO: Should song position pointer / song select actually be supported
+      // in midi files? Do they even make sense?
       case SystemMessage.SONG_POSITION_POINTER: {
         const songPosition =
-          (chunk.getUint8(offset + 1) << 7) | chunk.getUint8(offset);
+          (this.chunk.getUint8(this.byteOffset + 1) << 7) |
+          this.chunk.getUint8(this.byteOffset);
         console.log(`Song position pointer event with data ${songPosition}`);
-        offset += 2;
+        this.byteOffset += 2;
         break;
       }
       case SystemMessage.SONG_SELECT: {
-        const songIndex = chunk.getUint8(offset);
+        const songIndex = this.chunk.getUint8(this.byteOffset);
         console.log(`Song select event with data ${songIndex}`);
-        offset += 1;
+        this.byteOffset += 1;
         break;
       }
       default: {
         console.log(`${SystemMessage[status]} event`);
       }
     }
-
-    return offset;
   }
 
   private handleMeta(type: MetaEvent, data: Uint8Array) {
     switch (type) {
       case MetaEvent.TEXT:
       case MetaEvent.COPYRIGHT:
-      case MetaEvent.TRACK_NAME:
-      case MetaEvent.INSTRUMENT_NAME:
       case MetaEvent.LYRIC:
       case MetaEvent.MARKER:
       case MetaEvent.CUE_POINT: {
-        console.log(`${MetaEvent[type]}: ${this.asciiDecoder.decode(data)}`);
+        console.log(`${MetaEvent[type]}: ${this.decoder.decode(data)}`);
+        break;
+      }
+      case MetaEvent.TRACK_NAME: {
+        this.track.name = this.decoder.decode(data);
+        break;
+      }
+      case MetaEvent.INSTRUMENT_NAME: {
+        this.track.instrumentName = this.decoder.decode(data);
+        break;
+      }
+      case MetaEvent.SEQUENCE_NUMBER: {
+        this.track.sequenceNumber ??= (data[0] << 8) | data[1];
+        if (this.ticks !== 0) {
+          console.warn(
+            `Sequence number event not at beginning of track (${this.ticks} t)`
+          );
+        }
         break;
       }
       case MetaEvent.KEY_SIGNATURE: {
@@ -908,7 +1014,16 @@ export class FileParser extends TypedEventTarget<{
       }
       case MetaEvent.TEMPO: {
         const tempo = (data[0] << 16) | (data[1] << 8) | data[2];
-        this.tempoEventEmitter.dispatchEvent('tempo', tempo);
+        this.tempoMapBuilder?.addChange(this.ticks, tempo);
+        break;
+      }
+      case MetaEvent.END_OF_TRACK: {
+        if (this.byteOffset !== this.chunk.byteLength) {
+          console.warn(
+            `Bytes remaining after end of track event: ` +
+              `${this.chunk.byteLength - this.byteOffset}`
+          );
+        }
         break;
       }
       default: {

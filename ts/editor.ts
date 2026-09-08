@@ -1,11 +1,18 @@
 'use strict';
 
-import {FileParser} from './message.js';
+import {
+  ChannelControlMessage,
+  ChannelControlType,
+  FileParser,
+  GenericMessage,
+  Instrument,
+  MessageType,
+} from './message.js';
 import {Note, NoteString} from './note.js';
 import {Player} from './player.js';
 import {PianoRenderer} from './rendering.js';
 import {Selector} from './selector.js';
-import {KeyPress, Span} from './song.js';
+import {INCONCLUSIVE, KeyPress, Span} from './song.js';
 import {TempoMap} from './tempo.js';
 import {elementDeps, sleep} from './utils.js';
 
@@ -20,6 +27,7 @@ const DEFAULT_TEMPO_MAP = TempoMap.builder(96).build();
 interface EditorData {
   spans: Span[];
   tempo: TempoMap;
+  instrumentsByChannel: Map<number, Instrument>;
 }
 
 export class Editor {
@@ -54,6 +62,7 @@ export class Editor {
   private editorData: EditorData = {
     spans: [],
     tempo: DEFAULT_TEMPO_MAP,
+    instrumentsByChannel: new Map<number, Instrument>(),
   };
   private moveStart: [number, number] | null = null;
   private drawContext = this.elements.noteCanvas.getContext('2d')!;
@@ -121,6 +130,18 @@ export class Editor {
   }
 
   async play() {
+    for (const [
+      channel,
+      instrument,
+    ] of this.editorData.instrumentsByChannel.entries()) {
+      console.log(`Setting channel ${channel} to ${Instrument[instrument]}`);
+      this.player.send(
+        new GenericMessage(
+          new Uint8Array([MessageType.PROGRAM_CHANGE | channel, instrument])
+        )
+      );
+    }
+
     const events = this.melody()
       .flatMap((s) => [s.startEvent(), s.endEvent()])
       .toSorted((a, b) => a.ticks - b.ticks);
@@ -129,7 +150,6 @@ export class Editor {
         ? this.editorData.tempo.ticksToSeconds(events[events.length - 1].ticks)
         : 0;
     console.log(`Playing melody with duration ${duration} s`);
-
     for (let i = 0; i < events.length; i++) {
       if (i > 0 && events[i - 1].ticks < events[i].ticks) {
         const diffSeconds =
@@ -138,6 +158,26 @@ export class Editor {
         await sleep(diffSeconds * 1000);
       }
       this.player.send(events[i].message);
+    }
+
+    await sleep(1000);
+    console.log(`Resetting instruments to ${Instrument[0]}`);
+    for (const channel of this.editorData.instrumentsByChannel.keys()) {
+      this.player.send(
+        new GenericMessage(
+          new Uint8Array([MessageType.PROGRAM_CHANGE | channel, 0])
+        )
+      );
+    }
+    console.log(`Resetting all controllers`);
+    for (let channel = 0; channel < 16; channel++) {
+      this.player.send(
+        new ChannelControlMessage(
+          ChannelControlType.RESET_ALL_CONTROLLERS,
+          0,
+          channel
+        )
+      );
     }
   }
 
@@ -209,13 +249,40 @@ export class Editor {
       reader.readAsArrayBuffer(file);
     });
 
-    const parser = new FileParser(buffer);
-    this.editorData = {spans: [], tempo: DEFAULT_TEMPO_MAP};
-    parser.addEventListener('span', (span) => this.editorData.spans.push(span));
-    parser.addEventListener('tempo', (tempo) => {
-      this.editorData.tempo = tempo;
-    });
-    parser.parse();
+    const song = new FileParser(buffer).parse();
+    console.log(song);
+
+    const instrumentsByChannel = new Map<
+      number,
+      Instrument | typeof INCONCLUSIVE
+    >();
+    for (const track of song.tracks) {
+      if (track.channel === INCONCLUSIVE) {
+        continue;
+      }
+      if (
+        instrumentsByChannel.getOrInsert(track.channel, track.instrument) !==
+        track.instrument
+      ) {
+        instrumentsByChannel.set(track.channel, INCONCLUSIVE);
+      }
+    }
+    if (!(song.timingInfo instanceof TempoMap)) {
+      throw new Error(`Not a tempo map: ${song.timingInfo}`);
+    }
+
+    this.editorData = {
+      spans: song.tracks.flatMap((track) => track.spans),
+      tempo: song.timingInfo,
+      instrumentsByChannel: new Map<number, Instrument>(
+        instrumentsByChannel
+          .entries()
+          .filter(
+            ([_, instrument]) => instrument !== INCONCLUSIVE
+          ) as IteratorObject<[number, Instrument]>
+      ),
+    };
+
     const numNotes = this.editorData.spans.filter(
       (s) => s instanceof KeyPress
     ).length;
