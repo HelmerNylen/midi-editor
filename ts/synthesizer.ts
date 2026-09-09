@@ -168,6 +168,7 @@ export class Synthesizer implements SimpleMIDIOutput {
         this.sustain = applySustain;
         break;
       }
+      // TODO: Sustain pedal takes precedence over ALL_NOTES_OFF.
       case ChannelControlType.ALL_NOTES_OFF:
       case ChannelControlType.ALL_SOUND_OFF:
         for (const keyGraph of this.keyGraphs.values()) {

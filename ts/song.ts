@@ -21,9 +21,10 @@ import {Note} from './note.js';
 export class Song {
   copyright?: string;
 
-  constructor(readonly timingInfo: TimingInfo) {}
-
-  readonly tracks: Track[] = [];
+  constructor(
+    readonly timingInfo: TimingInfo,
+    readonly tracks: Track[] = []
+  ) {}
 
   serialize(format: 0 | 1 = 1): ArrayBuffer {
     // TODO
@@ -256,7 +257,11 @@ export class Switch extends Span<ChannelControlMessage> {
   }
 
   static getSpanKey(message: ChannelControlMessage): number {
-    return formSpanKey(SpanCategory.KEY_PRESS, message.channel, message.type);
+    return formSpanKey(
+      SpanCategory.CHANNEL_CONTROL_SWITCH,
+      message.channel,
+      message.type
+    );
   }
 
   static isStart(message: Message): message is ChannelControlMessage {

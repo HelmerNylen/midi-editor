@@ -249,7 +249,7 @@ export class Editor {
       reader.readAsArrayBuffer(file);
     });
 
-    const song = new FileParser(buffer).parse();
+    const song = new FileParser(buffer, /*debugTagBytes=*/ true).parse();
     console.log(song);
 
     const instrumentsByChannel = new Map<

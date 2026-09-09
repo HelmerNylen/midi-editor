@@ -7,3 +7,6 @@ package-lock.json
 
 # Build output directory
 js/
+
+# Local setup notes
+notes.md

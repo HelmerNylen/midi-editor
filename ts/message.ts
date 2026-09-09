@@ -1,5 +1,6 @@
 'use strict';
 
+import {ByteTagger, Tag} from './byteTagger.js';
 import {TypedEventTarget} from './event.js';
 import {keyFromNumSharps, keyLabel, Note} from './note.js';
 import {Event, INCONCLUSIVE, KeyPress, Song, Switch, Track} from './song.js';
@@ -397,6 +398,7 @@ export function apply14BitUpdate(
     }
   }
 
+  // TODO: Receiving an MSB should zero out the LSB.
   value &= isMsb ? LSB_MASK_14_BIT : MSB_MASK_14_BIT;
   value |= isMsb ? message.data << 7 : message.data;
   return value;
@@ -582,9 +584,16 @@ export class FileParser {
   private ticksPerQuarter?: number;
   private secondsPerTick?: number;
   private tempoMap?: TempoMap;
+  private byteTagger?: ByteTagger;
 
-  constructor(private buffer: ArrayBuffer) {
+  constructor(
+    private buffer: ArrayBuffer,
+    debugTagBytes = false
+  ) {
     this.view = new DataView(buffer);
+    if (debugTagBytes) {
+      this.byteTagger = new ByteTagger(buffer.byteLength);
+    }
   }
 
   parse(): Song {
@@ -596,35 +605,54 @@ export class FileParser {
         this.buffer.slice(offset, offset + CHUNK_TYPE_LENGTH)
       );
       const length = this.view.getUint32(offset + CHUNK_TYPE_LENGTH);
-      const chunkEnd = offset + CHUNK_HEADER_LENGTH + length;
+      offset += CHUNK_HEADER_LENGTH;
+
+      this.byteTagger?.tagRange(
+        CHUNK_TYPE_LENGTH,
+        Tag.STRING,
+        Tag.CHUNK_HEADER
+      );
+      this.byteTagger?.tagRange(
+        4,
+        Tag.FIXED_INT,
+        Tag.CHUNK_HEADER,
+        Tag.DATA_LENGTH
+      );
+      this.byteTagger?.assertPointerAt(offset);
+
+      const chunkEnd = offset + length;
       if (chunkEnd > this.buffer.byteLength) {
         throw new Error(
           `Chunk of type ${type} at offset ${offset} ends at ` +
             `${chunkEnd}, but the file is only ${this.buffer.byteLength} long`
         );
       }
-      const content = new DataView(
-        this.buffer,
-        offset + CHUNK_HEADER_LENGTH,
-        length
-      );
+      const content = new DataView(this.buffer, offset, length);
 
       switch (type) {
         case 'MThd':
           this.readHeader(content);
           break;
         case 'MTrk': {
-          const {track, tempoMap} = new TrackParser(
-            content,
-            this.asciiDecoder,
-            this.ticksPerQuarter
-          ).parse();
-          // TODO: Format 2 files may have different tempos for different
-          // tracks.
-          if (!this.tempoMap && tempoMap) {
-            this.tempoMap = tempoMap;
+          try {
+            const {track, tempoMap} = new TrackParser(
+              content,
+              this.asciiDecoder,
+              this.ticksPerQuarter,
+              this.byteTagger
+            ).parse();
+            // TODO: Format 2 files may have different tempos for different
+            // tracks.
+            if (!this.tempoMap && tempoMap) {
+              this.tempoMap = tempoMap;
+            }
+            tracks.push(track);
+          } catch (e) {
+            this.byteTagger?.visualizeEnd(this.view, (tags, value) =>
+              this.provideByteTaggerComment(tags, value)
+            );
+            throw e;
           }
-          tracks.push(track);
           break;
         }
         default:
@@ -632,7 +660,8 @@ export class FileParser {
           break;
       }
 
-      offset += CHUNK_HEADER_LENGTH + length;
+      offset += length;
+      this.byteTagger?.assertPointerAt(offset);
     }
 
     if (!this.tempoMap) {
@@ -643,9 +672,7 @@ export class FileParser {
       this.tempoMap = TempoMap.builder(this.ticksPerQuarter).build();
     }
 
-    const song = new Song(this.tempoMap!);
-    song.tracks.splice(0, 0, ...tracks);
-    return song;
+    return new Song(this.tempoMap!, tracks);
   }
 
   private readHeader(chunk: DataView) {
@@ -659,6 +686,7 @@ export class FileParser {
     const format = chunk.getUint16(0);
     const numTracks = chunk.getUint16(2);
     const division = chunk.getUint16(4);
+    this.byteTagger?.tagRange(6, Tag.FIXED_INT);
 
     if (format === 0 && numTracks !== 1) {
       throw new Error(
@@ -686,6 +714,28 @@ export class FileParser {
 
     console.log(`Format ${format}, ${numTracks} tracks`);
   }
+
+  private provideByteTaggerComment(
+    tags: ReadonlySet<Tag>,
+    value: number
+  ): string {
+    if (tags.has(Tag.STATUS)) {
+      if (value === SystemMessage.RESET) {
+        return `Meta event`;
+      }
+      if ((value & MESSAGE_TYPE_MASK) === MessageType.SYSTEM_COMMON) {
+        return `Sysex ${SystemMessage[value]}`;
+      }
+      return (
+        `${MessageType[value & MESSAGE_TYPE_MASK]}` +
+        ` ch ${value & CHANNEL_MASK}`
+      );
+    }
+    if (tags.has(Tag.STRING)) {
+      return `'${this.asciiDecoder.decode(new Uint8Array([value]))}'`;
+    }
+    return '';
+  }
 }
 
 class TrackParser {
@@ -701,11 +751,13 @@ class TrackParser {
   private didParse = false;
   private byteOffset = 0;
   private ticks = 0;
+  private parserError?: Error;
 
   constructor(
     private readonly chunk: DataView,
     private readonly decoder: TextDecoder,
-    ticksPerQuarter?: number
+    ticksPerQuarter?: number,
+    private readonly byteTagger?: ByteTagger
   ) {
     if (ticksPerQuarter !== undefined) {
       this.tempoMapBuilder = TempoMap.builder(ticksPerQuarter);
@@ -718,41 +770,61 @@ class TrackParser {
       this.onChannelControl.bind(this)
     );
     this.messageParser.addEventListener('unmapped', this.onUnmapped.bind(this));
+    if (this.byteTagger) {
+      // The initial status byte (if one exists) is already tagged.
+      this.messageParser.addEventListener('message', (message) => {
+        this.byteTagger?.tagRange(
+          message.serialize().byteLength - 1,
+          Tag.MIDI_EVENT_PAYLOAD
+        );
+      });
+    }
   }
 
   private onNoteOn(message: NoteOn) {
-    const key = KeyPress.getSpanKey(message);
-    const existing = this.spanStarts.get(key) as Event<NoteOn>;
-    if (existing) {
-      console.warn(
-        `Note already pressed: ${message.note} (ch ${message.channel}, ` +
-          `${this.ticks} t)`
-      );
-      this.track.spans.push(
-        KeyPress.create(existing, {
-          ticks: this.ticks,
-          message: existing.message.getNoteOff(),
-        })
-      );
+    try {
+      const key = KeyPress.getSpanKey(message);
+      const existing = this.spanStarts.get(key) as Event<NoteOn>;
+      if (existing) {
+        console.warn(
+          `Note already pressed: ${message.note} (ch ${message.channel}, ` +
+            `${this.ticks} t)`
+        );
+        this.track.spans.push(
+          KeyPress.create(existing, {
+            ticks: this.ticks,
+            message: existing.message.getNoteOff(),
+          })
+        );
+      }
+      this.spanStarts.set(key, {ticks: this.ticks, message});
+      this.instrumentsByChannel.getOrInsert(message.channel, INCONCLUSIVE);
+    } catch (e) {
+      this.parserError = e as Error;
+      throw e;
     }
-    this.spanStarts.set(key, {ticks: this.ticks, message});
-    this.instrumentsByChannel.getOrInsert(message.channel, INCONCLUSIVE);
   }
 
   private onNoteOff(message: NoteOff) {
-    const key = KeyPress.getSpanKey(message);
-    const noteOnEvent = this.spanStarts.get(key) as Event<NoteOn>;
-    if (!noteOnEvent) {
-      console.warn(
-        `Note not pressed: ${message.note} (ch ${message.channel}, ` +
-          `${this.ticks} t)`
+    try {
+      const key = KeyPress.getSpanKey(message);
+      const noteOnEvent = this.spanStarts.get(key) as Event<NoteOn>;
+      if (!noteOnEvent) {
+        // TODO: Redundant note offs should be ignored (without logging).
+        console.warn(
+          `Note not pressed: ${message.note} (ch ${message.channel}, ` +
+            `${this.ticks} t)`
+        );
+        return;
+      }
+      this.spanStarts.delete(key);
+      this.track.spans.push(
+        KeyPress.create(noteOnEvent, {ticks: this.ticks, message})
       );
-      return;
+    } catch (e) {
+      this.parserError = e as Error;
+      throw e;
     }
-    this.spanStarts.delete(key);
-    this.track.spans.push(
-      KeyPress.create(noteOnEvent, {ticks: this.ticks, message})
-    );
   }
 
   private onSwitchEnable(message: ChannelControlMessage) {
@@ -799,36 +871,55 @@ class TrackParser {
   }
 
   private onChannelControl(message: ChannelControlMessage) {
-    // If isStart would return false, typescript assumes the message cannot be a
-    // ChannelControlMessage. Cast to boolean to remove the type narrowing to
-    // 'never'.
-    if (Switch.isStart(message) as boolean) {
-      this.onSwitchEnable(message);
-    } else if (Switch.isEnd(message)) {
-      this.onSwitchDisable(message);
+    try {
+      // If isStart would return false, typescript assumes the message cannot be
+      // a ChannelControlMessage. Cast to boolean to remove the type narrowing
+      // to 'never'.
+      if (Switch.isStart(message) as boolean) {
+        this.onSwitchEnable(message);
+      } else if (Switch.isEnd(message)) {
+        this.onSwitchDisable(message);
+      }
+    } catch (e) {
+      this.parserError = e as Error;
+      throw e;
     }
   }
 
   private onUnmapped(message: GenericMessage) {
-    if (message.messageType === MessageType.PROGRAM_CHANGE) {
-      const currentInstrument = this.instrumentsByChannel.get(message.channel);
-      if (currentInstrument !== undefined) {
-        if (
-          currentInstrument !== message.data[0] &&
-          currentInstrument !== INCONCLUSIVE
-        ) {
-          // Multiple different instruments on the same channel, or already
-          // inconclusive, or a note on event was received before the instrument
-          // was specified.
-          console.warn(`Inconclusive instrument on channel ${message.channel}`);
-          this.instrumentsByChannel.set(message.channel, INCONCLUSIVE);
+    try {
+      if (message.messageType === MessageType.PROGRAM_CHANGE) {
+        console.log(
+          `Channel ${message.channel}: instrument ` +
+            Instrument[message.data[0]]
+        );
+
+        const currentInstrument = this.instrumentsByChannel.get(
+          message.channel
+        );
+        if (currentInstrument !== undefined) {
+          if (
+            currentInstrument !== message.data[0] &&
+            currentInstrument !== INCONCLUSIVE
+          ) {
+            // Multiple different instruments on the same channel, or already
+            // inconclusive, or a note on event was received before the
+            // instrument was specified.
+            console.warn(
+              `Inconclusive instrument on channel ${message.channel}`
+            );
+            this.instrumentsByChannel.set(message.channel, INCONCLUSIVE);
+          }
+        } else {
+          // Instrument specified before any note on events.
+          this.instrumentsByChannel.set(message.channel, message.data[0]);
         }
-      } else {
-        // Instrument specified before any note on events.
-        this.instrumentsByChannel.set(message.channel, message.data[0]);
       }
+      this.track.events.push({ticks: this.ticks, message});
+    } catch (e) {
+      this.parserError = e as Error;
+      throw e;
     }
-    this.track.events.push({ticks: this.ticks, message});
   }
 
   parse(): {track: Track; tempoMap: TempoMap | undefined} {
@@ -840,22 +931,33 @@ class TrackParser {
 
     let lastStatus = null;
     while (this.byteOffset < this.chunk.byteLength) {
-      let delta;
-      [delta, this.byteOffset] = readUintN(this.chunk, this.byteOffset);
+      this.byteTagger?.assertPointerAt(this.chunk.byteOffset + this.byteOffset);
+      const [delta, newOffset] = readUintN(this.chunk, this.byteOffset);
+      this.byteTagger?.tagRange(
+        newOffset - this.byteOffset,
+        Tag.DELTA_TIME,
+        Tag.VARINT
+      );
       this.ticks += delta;
+      this.byteOffset = newOffset;
 
-      let status = this.chunk.getUint8(this.byteOffset++);
-      if (!(status & 0x80)) {
+      let status = this.chunk.getUint8(this.byteOffset);
+      if (status & 0x80) {
+        this.byteOffset++;
+        this.byteTagger?.tagAndIncrement(Tag.STATUS);
+        lastStatus = status;
+      } else {
         // Running status
         // TODO: Only kept for MIDI events (i.e. not sysex/meta)?
+        // TODO: Certain messages should clear the running status.
+        this.byteTagger?.tag(Tag.RUNNING_STATUS_USED);
         if (lastStatus === null) {
           throw new Error(`Missing status byte in first event`);
         }
         status = lastStatus;
-      } else {
-        lastStatus = status;
       }
 
+      this.byteTagger?.assertPointerAt(this.chunk.byteOffset + this.byteOffset);
       switch (status & MESSAGE_TYPE_MASK) {
         case MessageType.SYSTEM_COMMON: {
           this.handleSysex(status);
@@ -881,10 +983,17 @@ class TrackParser {
           break;
         }
       }
+      if (this.parserError) {
+        console.error('Error in track parser', this);
+        throw this.parserError;
+      }
     }
 
     if (this.spanStarts.size !== 0) {
-      console.warn(`Unfinished spans on track end: ${this.spanStarts.size}`);
+      console.warn(
+        `Unfinished spans on track end: ${this.spanStarts.size}`,
+        this.spanStarts
+      );
     }
 
     if (this.instrumentsByChannel.size === 1) {
@@ -906,22 +1015,32 @@ class TrackParser {
     return {track: this.track, tempoMap};
   }
 
+  // When called, the byteOffset points to the byte after the status.
   private handleSysex(status: number) {
     switch (status) {
       case SystemMessage.SYSTEM_EXCLUSIVE:
       case SystemMessage.END_OF_EXCLUSIVE: {
         // System exclusive: F0 <len> <len - 1 bytes of data> F7
         //               or: F7 <len> <len bytes of data>
-        let length;
-        [length, this.byteOffset] = readUintN(this.chunk, this.byteOffset);
+        const [length, newOffset] = readUintN(this.chunk, this.byteOffset);
+        this.byteTagger?.tagRange(
+          newOffset - this.byteOffset,
+          Tag.VARINT,
+          Tag.DATA_LENGTH,
+          Tag.SYSEX_EVENT_PAYLOAD
+        );
+        this.byteTagger?.tagRange(length, Tag.SYSEX_EVENT_PAYLOAD);
+
         // Skip over message.
-        this.byteOffset += length;
+        this.byteOffset = newOffset + length;
         if (
           status === SystemMessage.SYSTEM_EXCLUSIVE &&
           (length === 0 ||
             this.chunk.getUint8(this.byteOffset - 1) !==
               SystemMessage.END_OF_EXCLUSIVE)
         ) {
+          // TODO: Consider removing, this may be valid if the message is split
+          // over multiple events.
           console.warn(
             `0xF0 system message at offset ${this.byteOffset - length - 1} ` +
               `missing trailing 0xF7 at offset ${this.byteOffset - 1}`,
@@ -933,8 +1052,16 @@ class TrackParser {
       case SystemMessage.RESET: {
         // Meta event: FF <event type> <len> <len bytes of data>
         const metaEventType = this.chunk.getUint8(this.byteOffset++);
-        let length;
-        [length, this.byteOffset] = readUintN(this.chunk, this.byteOffset);
+        this.byteTagger?.tagAndIncrement(Tag.META_EVENT_TYPE);
+        const [length, newOffset] = readUintN(this.chunk, this.byteOffset);
+        this.byteTagger?.tagRange(
+          newOffset - this.byteOffset,
+          Tag.VARINT,
+          Tag.DATA_LENGTH,
+          Tag.META_EVENT_PAYLOAD
+        );
+        this.byteOffset = newOffset;
+
         const data = new Uint8Array(
           this.chunk.buffer,
           this.chunk.byteOffset + this.byteOffset,
@@ -952,12 +1079,14 @@ class TrackParser {
           this.chunk.getUint8(this.byteOffset);
         console.log(`Song position pointer event with data ${songPosition}`);
         this.byteOffset += 2;
+        this.byteTagger?.tagRange(2, Tag.FIXED_INT);
         break;
       }
       case SystemMessage.SONG_SELECT: {
         const songIndex = this.chunk.getUint8(this.byteOffset);
         console.log(`Song select event with data ${songIndex}`);
         this.byteOffset += 1;
+        this.byteTagger?.tagAndIncrement(Tag.FIXED_INT);
         break;
       }
       default: {
@@ -974,14 +1103,29 @@ class TrackParser {
       case MetaEvent.MARKER:
       case MetaEvent.CUE_POINT: {
         console.log(`${MetaEvent[type]}: ${this.decoder.decode(data)}`);
+        this.byteTagger?.tagRange(
+          data.length,
+          Tag.META_EVENT_PAYLOAD,
+          Tag.STRING
+        );
         break;
       }
       case MetaEvent.TRACK_NAME: {
         this.track.name = this.decoder.decode(data);
+        this.byteTagger?.tagRange(
+          data.length,
+          Tag.META_EVENT_PAYLOAD,
+          Tag.STRING
+        );
         break;
       }
       case MetaEvent.INSTRUMENT_NAME: {
         this.track.instrumentName = this.decoder.decode(data);
+        this.byteTagger?.tagRange(
+          data.length,
+          Tag.META_EVENT_PAYLOAD,
+          Tag.STRING
+        );
         break;
       }
       case MetaEvent.SEQUENCE_NUMBER: {
@@ -991,12 +1135,22 @@ class TrackParser {
             `Sequence number event not at beginning of track (${this.ticks} t)`
           );
         }
+        this.byteTagger?.tagRange(
+          data.length,
+          Tag.META_EVENT_PAYLOAD,
+          Tag.FIXED_INT
+        );
         break;
       }
       case MetaEvent.KEY_SIGNATURE: {
         const key = keyFromNumSharps(data[0]);
         console.log(
           `Key: ${keyLabel(key, key)} ${data[1] ? 'minor' : 'major'}`
+        );
+        this.byteTagger?.tagRange(
+          data.length,
+          Tag.META_EVENT_PAYLOAD,
+          Tag.FIXED_INT
         );
         break;
       }
@@ -1010,10 +1164,16 @@ class TrackParser {
             `${clocksPerClick} clocks (${24 / clocksPerClick} clicks/quarter)` +
             `, ${32 / unitLengthInNotesBy32} quarters per note`
         );
+        this.byteTagger?.tagRange(data.length, Tag.META_EVENT_PAYLOAD);
         break;
       }
       case MetaEvent.TEMPO: {
         const tempo = (data[0] << 16) | (data[1] << 8) | data[2];
+        this.byteTagger?.tagRange(
+          data.length,
+          Tag.META_EVENT_PAYLOAD,
+          Tag.FIXED_INT
+        );
         this.tempoMapBuilder?.addChange(this.ticks, tempo);
         break;
       }
@@ -1024,10 +1184,12 @@ class TrackParser {
               `${this.chunk.byteLength - this.byteOffset}`
           );
         }
+        this.byteTagger?.tagRange(data.length, Tag.META_EVENT_PAYLOAD);
         break;
       }
       default: {
         console.log(`${MetaEvent[type]} meta event with data`, data);
+        this.byteTagger?.tagRange(data.length, Tag.META_EVENT_PAYLOAD);
         break;
       }
     }
