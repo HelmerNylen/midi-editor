@@ -20,8 +20,10 @@ type Melody = Span[];
 
 const TOP_BAR_HEIGHT_PIXELS = 64;
 const PIANO_HEIGHT_PIXELS = 64;
-const GRID_SIZE = 2;
+const GRID_SIZE = 100;
 const KEY_GAP_COLOR = '#222';
+const WHITE_KEY_NOTE_COLOR = 'salmon';
+const BLACK_KEY_NOTE_COLOR = 'firebrick';
 const DEFAULT_TEMPO_MAP = TempoMap.builder(96).build();
 
 interface EditorData {
@@ -64,6 +66,7 @@ export class Editor {
     tempo: DEFAULT_TEMPO_MAP,
     instrumentsByChannel: new Map<number, Instrument>(),
   };
+  private playStartedAt: number | null = null;
   private moveStart: [number, number] | null = null;
   private drawContext = this.elements.noteCanvas.getContext('2d')!;
 
@@ -130,6 +133,12 @@ export class Editor {
   }
 
   async play() {
+    if (this.playStartedAt !== null) {
+      this.playStartedAt = null;
+      return;
+    }
+    this.playStartedAt = performance.now();
+
     for (const [
       channel,
       instrument,
@@ -150,17 +159,28 @@ export class Editor {
         ? this.editorData.tempo.ticksToSeconds(events[events.length - 1].ticks)
         : 0;
     console.log(`Playing melody with duration ${duration} s`);
-    for (let i = 0; i < events.length; i++) {
-      if (i > 0 && events[i - 1].ticks < events[i].ticks) {
+    let prevTicks = 0;
+    for (const event of events) {
+      if (prevTicks < event.ticks) {
         const diffSeconds =
-          this.editorData.tempo.ticksToSeconds(events[i].ticks) -
-          this.editorData.tempo.ticksToSeconds(events[i - 1].ticks);
+          this.editorData.tempo.ticksToSeconds(event.ticks) -
+          this.editorData.tempo.ticksToSeconds(prevTicks);
         await sleep(diffSeconds * 1000);
+        if (this.playStartedAt === null) {
+          // Interrupted, stop playback.
+          break;
+        }
       }
-      this.player.send(events[i].message);
+      prevTicks = event.ticks;
+      // Adjust timeline in case of lag.
+      this.playStartedAt =
+        performance.now() -
+        this.editorData.tempo.ticksToSeconds(event.ticks) * 1000;
+      this.player.send(event.message);
     }
 
     await sleep(1000);
+    this.playStartedAt = null;
     console.log(`Resetting instruments to ${Instrument[0]}`);
     for (const channel of this.editorData.instrumentsByChannel.keys()) {
       this.player.send(
@@ -188,6 +208,7 @@ export class Editor {
     }
   }
 
+  // TODO: These coordinate transforms are all wrong.
   private onCanvasMouseUp(e: MouseEvent) {
     if (e.button === 0 && this.moveStart) {
       const note = this.pianoRenderer.getNote(e.offsetX);
@@ -282,6 +303,7 @@ export class Editor {
           ) as IteratorObject<[number, Instrument]>
       ),
     };
+    this.playStartedAt = null;
 
     const numNotes = this.editorData.spans.filter(
       (s) => s instanceof KeyPress
@@ -299,7 +321,7 @@ export class Editor {
     this.melodySelector.select(this.melodies[this.melodies.length - 1]);
   }
 
-  private draw(_: DOMHighResTimeStamp) {
+  private draw(now: DOMHighResTimeStamp) {
     const width = this.elements.noteCanvas.width;
     const height = this.elements.noteCanvas.height;
     const pianoStartY = height - PIANO_HEIGHT_PIXELS;
@@ -307,25 +329,37 @@ export class Editor {
     this.drawContext.clearRect(0, 0, width, height);
     this.drawContext.save();
 
+    const timeAdjustment =
+      this.playStartedAt !== null ? (this.playStartedAt - now) / 1000 : 0;
+    // TODO: Optimize (filter spans based on limits in ticks etc.).
+    for (const span of this.editorData.spans) {
+      if (!('note' in span)) {
+        continue;
+      }
+
+      this.drawContext.fillStyle = (span as KeyPress).note.isWhite
+        ? WHITE_KEY_NOTE_COLOR
+        : BLACK_KEY_NOTE_COLOR;
+      const t0 = this.editorData.tempo.ticksToSeconds(span.start);
+      const t1 = this.editorData.tempo.ticksToSeconds(span.end);
+      const h = (t1 - t0) * GRID_SIZE;
+      const y = pianoStartY - (t0 + timeAdjustment) * GRID_SIZE - h;
+
+      if (y >= pianoStartY || y + h < 0) {
+        continue;
+      }
+      const [x0, x1] = this.pianoRenderer.getNoteCoords(
+        (span as KeyPress).note
+      );
+      this.drawContext.fillRect(x0, y, x1 - x0, h);
+    }
+
     // Draw lines between white keys.
     this.drawContext.fillStyle = KEY_GAP_COLOR;
     this.drawContext.fillRect(0, pianoStartY, width, PIANO_HEIGHT_PIXELS);
 
     this.pianoRenderer.drawPianoTo(this.drawContext, 0, pianoStartY);
     this.pianoRenderer.drawPedalsTo(this.drawContext, 0, pianoStartY);
-
-    this.drawContext.fillStyle = 'salmon';
-    for (const span of this.editorData.spans) {
-      if (!('note' in span)) {
-        continue;
-      }
-      const [x0, x1] = this.pianoRenderer.getNoteCoords(
-        (span as KeyPress).note
-      );
-      const y = (span.start * GRID_SIZE) / QUARTER;
-      const h = (span.duration * GRID_SIZE) / QUARTER;
-      this.drawContext.fillRect(x0, y, x1 - x0, h);
-    }
 
     this.drawContext.restore();
     requestAnimationFrame((time) => this.draw(time));

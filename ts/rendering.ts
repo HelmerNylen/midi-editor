@@ -50,7 +50,7 @@ export class PianoRenderer {
   private maximumNote = Note.fromString('C8');
   private blackKeyHeightRatio = 0.55;
   private blackKeyColor = 'black';
-  private blackKeyPressedColor = 'salmon';
+  private blackKeyPressedColor = 'firebrick';
   private whiteKeyColor = 'white';
   private whiteKeyPressedColor = 'salmon';
   private whiteKeyGapPixels = 2;
