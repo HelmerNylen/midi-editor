@@ -20,7 +20,8 @@ type Melody = Span[];
 
 const TOP_BAR_HEIGHT_PIXELS = 64;
 const PIANO_HEIGHT_PIXELS = 64;
-const GRID_SIZE = 100;
+const GRID_SIZE = 40;
+const ONE_BY_MAX_VELOCITY = 1 / 0xff;
 const KEY_GAP_COLOR = '#222';
 const WHITE_KEY_NOTE_COLOR = 'salmon';
 const BLACK_KEY_NOTE_COLOR = 'firebrick';
@@ -337,9 +338,6 @@ export class Editor {
         continue;
       }
 
-      this.drawContext.fillStyle = (span as KeyPress).note.isWhite
-        ? WHITE_KEY_NOTE_COLOR
-        : BLACK_KEY_NOTE_COLOR;
       const t0 = this.editorData.tempo.ticksToSeconds(span.start);
       const t1 = this.editorData.tempo.ticksToSeconds(span.end);
       const h = (t1 - t0) * GRID_SIZE;
@@ -351,10 +349,17 @@ export class Editor {
       const [x0, x1] = this.pianoRenderer.getNoteCoords(
         (span as KeyPress).note
       );
+
+      this.drawContext.fillStyle = (span as KeyPress).note.isWhite
+        ? WHITE_KEY_NOTE_COLOR
+        : BLACK_KEY_NOTE_COLOR;
+      const v = (span as KeyPress).velocity * ONE_BY_MAX_VELOCITY;
+      this.drawContext.globalAlpha = 0.2 + 0.8 * v;
       this.drawContext.fillRect(x0, y, x1 - x0, h);
     }
 
     // Draw lines between white keys.
+    this.drawContext.globalAlpha = 1;
     this.drawContext.fillStyle = KEY_GAP_COLOR;
     this.drawContext.fillRect(0, pianoStartY, width, PIANO_HEIGHT_PIXELS);
 
