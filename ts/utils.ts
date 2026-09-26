@@ -66,3 +66,12 @@ export function optionalElementDeps<T extends ElementsById>(
 export function floorInexact(x: number, epsilon = 1e-6): number {
   return Math.floor(x + epsilon);
 }
+
+/**
+ * Ceils the provided number to the nearest integer after first subtracting a
+ * small `epsilon` to compensate for floating-point rounding errors. This
+ * ensures values like 1.0000000002 are rounded to 1 instead of 2.
+ */
+export function ceilInexact(x: number, epsilon = 1e-6): number {
+  return Math.ceil(x - epsilon);
+}

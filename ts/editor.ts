@@ -15,12 +15,12 @@ import {Selector} from './selector.js';
 import {INCONCLUSIVE, KeyPress, Span} from './song.js';
 import {TempoMap} from './tempo.js';
 import {elementDeps, sleep} from './utils.js';
+import {Viewport} from './viewport.js';
 
 type Melody = Span[];
 
 const TOP_BAR_HEIGHT_PIXELS = 64;
 const PIANO_HEIGHT_PIXELS = 64;
-const GRID_SIZE = 40;
 const ONE_BY_MAX_VELOCITY = 1 / 0xff;
 const KEY_GAP_COLOR = '#222';
 const WHITE_KEY_NOTE_COLOR = 'salmon';
@@ -42,8 +42,18 @@ export class Editor {
     midiUpload: HTMLButtonElement,
     midiUploadInput: HTMLInputElement,
   });
-  private readonly pianoRenderer = new PianoRenderer();
-  private readonly player = new Player();
+  private readonly viewport = new Viewport(
+    this.elements.noteCanvas,
+    DEFAULT_TEMPO_MAP,
+    {
+      bottom: PIANO_HEIGHT_PIXELS,
+      reverseY: true,
+    }
+  );
+  private readonly pianoRenderer = new PianoRenderer(
+    this.viewport.notePositioner,
+    PIANO_HEIGHT_PIXELS
+  );
 
   private readonly melodies: Array<() => Melody> = [
     shoreline,
@@ -62,13 +72,14 @@ export class Editor {
     (melody) => melody.name[0].toUpperCase() + melody.name.substring(1)
   );
 
+  private readonly player = new Player();
   private editorData: EditorData = {
     spans: [],
     tempo: DEFAULT_TEMPO_MAP,
     instrumentsByChannel: new Map<number, Instrument>(),
   };
   private playStartedAt: number | null = null;
-  private moveStart: [number, number] | null = null;
+  private moveStart: {note: Note; ticks: number} | null = null;
   private drawContext = this.elements.noteCanvas.getContext('2d')!;
 
   constructor() {
@@ -89,11 +100,15 @@ export class Editor {
       passive: true,
     });
     this.elements.noteCanvas.addEventListener('wheel', ({deltaY, shiftKey}) => {
-      const pianoRange = this.pianoRenderer.getRange();
-      const index = +shiftKey;
+      let min = this.viewport.noteMin;
+      let max = this.viewport.noteMax;
       const delta = shiftKey !== deltaY > 0 ? -1 : 1;
-      pianoRange[index] = pianoRange[index].transpose(delta);
-      this.pianoRenderer.setRange({min: pianoRange[0], max: pianoRange[1]});
+      if (shiftKey) {
+        max = max.transpose(delta);
+      } else {
+        min = min.transpose(delta);
+      }
+      this.viewport.setNoteBounds(min, max);
     });
     this.elements.noteCanvas.addEventListener('mousedown', (e) =>
       this.onCanvasMouseDown(e)
@@ -124,12 +139,9 @@ export class Editor {
   }
 
   private resizeCanvas() {
-    this.elements.noteCanvas.width = window.innerWidth;
-    this.elements.noteCanvas.height =
-      window.innerHeight - TOP_BAR_HEIGHT_PIXELS;
-    this.pianoRenderer.setSize({
-      width: this.elements.noteCanvas.width,
-      height: PIANO_HEIGHT_PIXELS,
+    this.viewport.resizeCanvas({
+      width: window.innerWidth,
+      height: window.innerHeight - TOP_BAR_HEIGHT_PIXELS,
     });
   }
 
@@ -204,33 +216,31 @@ export class Editor {
 
   private onCanvasMouseDown(e: MouseEvent) {
     if (e.button === 0) {
-      this.moveStart = [e.offsetX, e.offsetY];
+      this.moveStart = {
+        note: this.viewport.pixelsToNote(e.offsetX),
+        ticks: this.viewport.pixelsToTicks(e.offsetY),
+      };
       e.preventDefault();
     }
   }
 
-  // TODO: These coordinate transforms are all wrong.
   private onCanvasMouseUp(e: MouseEvent) {
     if (e.button === 0 && this.moveStart) {
-      const note = this.pianoRenderer.getNote(e.offsetX);
-      const start =
-        QUARTER *
-        Math.round(Math.min(this.moveStart[1], e.offsetY) / GRID_SIZE);
-      const end =
-        QUARTER *
-        Math.max(
-          1,
-          Math.ceil(Math.max(this.moveStart[1], e.offsetY) / GRID_SIZE)
-        );
-      this.editorData.spans.push(
-        new KeyPress(
-          note,
-          95,
-          this.editorData.tempo.secondsToTicks(start),
-          this.editorData.tempo.secondsToTicks(end)
-        )
+      const note = this.viewport.pixelsToNote(e.offsetX);
+      const endTicks = this.viewport.pixelsToTicks(e.offsetY);
+      const span = new KeyPress(
+        note,
+        95,
+        Math.min(this.moveStart.ticks, endTicks),
+        Math.max(this.moveStart.ticks, endTicks)
       );
-      console.log(`Added note ${note} at ${start} with length ${end - start}`);
+      this.editorData.spans.push(span);
+      const startSeconds = this.editorData.tempo.secondsToTicks(span.start);
+      const duration =
+        this.editorData.tempo.secondsToTicks(span.end) - startSeconds;
+      console.log(
+        `Added note ${note} at ${startSeconds} s with length ${duration} s`
+      );
       this.moveStart = null;
       e.preventDefault();
     }
@@ -238,8 +248,8 @@ export class Editor {
 
   private onCanvasClick(e: PointerEvent) {
     if (e.button === 2) {
-      const note = this.pianoRenderer.getNote(e.offsetX);
-      const ticks = this.editorData.tempo.secondsToTicks(e.offsetY / GRID_SIZE);
+      const note = this.viewport.pixelsToNote(e.offsetX);
+      const ticks = this.viewport.pixelsToTicks(e.offsetY);
       const index = this.editorData.spans.findIndex(
         (k) =>
           k instanceof KeyPress &&
@@ -304,6 +314,7 @@ export class Editor {
           ) as IteratorObject<[number, Instrument]>
       ),
     };
+    this.viewport.setTimingConverter(song.timingInfo);
     this.playStartedAt = null;
 
     const numNotes = this.editorData.spans.filter(
@@ -330,32 +341,42 @@ export class Editor {
     this.drawContext.clearRect(0, 0, width, height);
     this.drawContext.save();
 
-    const timeAdjustment =
-      this.playStartedAt !== null ? (this.playStartedAt - now) / 1000 : 0;
-    // TODO: Optimize (filter spans based on limits in ticks etc.).
+    const elapsedTime =
+      this.playStartedAt !== null
+        ? Math.max(0, now - this.playStartedAt) / 1000
+        : 0;
+    this.viewport.setMinSeconds(elapsedTime);
+
+    let lastColor: string | undefined = undefined;
+    let lastVelocity: number | undefined = undefined;
     for (const span of this.editorData.spans) {
-      if (!('note' in span)) {
+      if (
+        !('note' in span) ||
+        span.start > this.viewport.ticksMax ||
+        span.end < this.viewport.ticksMin
+      ) {
         continue;
       }
 
-      const t0 = this.editorData.tempo.ticksToSeconds(span.start);
-      const t1 = this.editorData.tempo.ticksToSeconds(span.end);
-      const h = (t1 - t0) * GRID_SIZE;
-      const y = pianoStartY - (t0 + timeAdjustment) * GRID_SIZE - h;
+      const x0 = this.viewport.noteLeftEdgeToPixels((span as KeyPress).note);
+      const x1 = this.viewport.noteRightEdgeToPixels((span as KeyPress).note);
+      const y0 = this.viewport.ticksToPixels(span.start);
+      const y1 = this.viewport.ticksToPixels(span.end);
 
-      if (y >= pianoStartY || y + h < 0) {
-        continue;
-      }
-      const [x0, x1] = this.pianoRenderer.getNoteCoords(
-        (span as KeyPress).note
-      );
-
-      this.drawContext.fillStyle = (span as KeyPress).note.isWhite
+      const color = (span as KeyPress).note.isWhite
         ? WHITE_KEY_NOTE_COLOR
         : BLACK_KEY_NOTE_COLOR;
-      const v = (span as KeyPress).velocity * ONE_BY_MAX_VELOCITY;
-      this.drawContext.globalAlpha = 0.2 + 0.8 * v;
-      this.drawContext.fillRect(x0, y, x1 - x0, h);
+      if (color !== lastColor) {
+        this.drawContext.fillStyle = color;
+        lastColor = color;
+      }
+      const velocity = (span as KeyPress).velocity;
+      if (velocity !== lastVelocity) {
+        this.drawContext.globalAlpha =
+          0.2 + 0.8 * velocity * ONE_BY_MAX_VELOCITY;
+        lastVelocity = velocity;
+      }
+      this.drawContext.fillRect(x0, y1, x1 - x0, y0 - y1);
     }
 
     // Draw lines between white keys.

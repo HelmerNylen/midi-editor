@@ -122,71 +122,105 @@ class PianoState extends TypedEventTarget<{
   }
 }
 
-interface Dimensions {
+export interface Dimensions {
   width: number;
   height: number;
 }
 
-type SetterEvents<Params> = {
-  [Param in keyof Params as `set${Capitalize<Param & string>}`]: Params[Param];
+type ParameterBagEvents<Params extends object> = Params & {
+  paramChange: keyof Params;
 };
 
-function toSetterEvent<Params>(
-  param: keyof Params & string
-): keyof SetterEvents<Params> {
-  return ('set' +
-    param.charAt(0).toUpperCase() +
-    param.substring(1)) as keyof SetterEvents<Params>;
+type ParameterBagValidators<Params extends object> = {
+  [Param in keyof Params]: (value: Params[Param]) => void;
+};
+
+/**
+ * A typed mapping of string parameters names to their values. Emits an event
+ * with the new value when a parameter is updated, and a general 'paramChange'
+ * event when any parameter is updated.
+ */
+abstract class ParameterBag<Params extends object> extends TypedEventTarget<
+  ParameterBagEvents<Params>
+> {
+  constructor(
+    private readonly mutableParams: Params,
+    private readonly validators: Partial<ParameterBagValidators<Params>> = {}
+  ) {
+    super();
+  }
+
+  /**
+   * Set the value of the provided `param` to `value`, returning whether the
+   * value changed.
+   */
+  setParam<Param extends keyof Params & string>(
+    param: Param,
+    value: Params[NoInfer<Param>]
+  ) {
+    this.validators[param]?.(value);
+    if (this.mutableParams[param] === value) {
+      return false;
+    }
+    this.mutableParams[param] = value;
+    this.dispatchEvent(
+      param,
+      value as ParameterBagEvents<Params>[NoInfer<Param>]
+    );
+    (this.dispatchEvent as (a: string, b: string) => void)(
+      'paramChange',
+      param
+    );
+    return true;
+  }
+
+  /** Gets a readonly view of the parameters. */
+  get params(): Readonly<Params> {
+    return this.mutableParams;
+  }
 }
 
 abstract class LazyRenderer<
   Params extends Dimensions = Dimensions,
-> extends TypedEventTarget<SetterEvents<Params>> {
+> extends ParameterBag<Params> {
   private readonly canvas: OffscreenCanvas;
   protected readonly context: OffscreenCanvasRenderingContext2D;
   private dirty = true;
 
-  constructor(private readonly mutableParams: Params) {
-    super();
-    this.canvas = new OffscreenCanvas(
-      mutableParams.width,
-      mutableParams.height
-    );
+  constructor(
+    params: Params,
+    validators: Partial<ParameterBagValidators<Params>> = {}
+  ) {
+    validators.width ??= (width) => {
+      if (!(width >= 0)) {
+        throw new Error(`Width must be non-negative, got: ${width}`);
+      }
+    };
+    validators.height ??= (height) => {
+      if (!(height >= 0)) {
+        throw new Error(`Height must be non-negative, got: ${height}`);
+      }
+    };
+    super(params, validators);
+
+    this.canvas = new OffscreenCanvas(params.width, params.height);
     const context = this.canvas.getContext('2d');
     if (!context) {
       throw new Error(`Failed to get 2d canvas rendering context`);
     }
     this.context = context;
 
-    this.addEventListener('setWidth', (width) => {
+    this.addEventListener('width', (width) => {
       if (width !== this.canvas.width) {
-        this.canvas.width = width as number;
+        this.canvas.width = width;
       }
     });
-    this.addEventListener('setHeight', (height) => {
+    this.addEventListener('height', (height) => {
       if (height !== this.canvas.height) {
-        this.canvas.height = height as number;
+        this.canvas.height = height;
       }
     });
-  }
-
-  setParam<Param extends keyof Params & string>(
-    param: Param,
-    value: Params[NoInfer<Param>]
-  ) {
-    if (this.mutableParams[param] !== value) {
-      this.mutableParams[param] = value;
-      const event = toSetterEvent<Params>(param);
-      this.dispatchEvent(
-        event,
-        value as unknown as SetterEvents<Params>[typeof event]
-      );
-      this.markDirty();
-    }
-  }
-
-  get params(): Readonly<Params> {
-    return this.mutableParams;
+    this.addEventListener('paramChange', () => this.markDirty());
   }
 
   get width(): number {
@@ -212,21 +246,20 @@ abstract class LazyRenderer<
   }
 }
 
-interface Bounds<T> {
+export interface Bounds<T> {
   min: T;
   max: T;
 }
 
-interface KeysRendererParams extends Dimensions {
+export interface NotePositionerParams {
+  width: number;
   range: Bounds<Note>;
+  /**
+   * Whether key widths should be equalized, making black and white keys take up
+   * equal space. Suitable for overlaying the piano over a logarithmic frequency
+   * axis.
+   */
   equalizeKeyWidths: boolean;
-  color: string;
-  pressedColor: string;
-  marginPixels: number;
-}
-
-interface MutableNote extends Note {
-  byteValue: number;
 }
 
 interface ComputedParams {
@@ -238,30 +271,36 @@ interface ComputedParams {
   octaveOffset: number;
 }
 
-class KeysRenderer extends LazyRenderer<KeysRendererParams> {
-  protected computedParams: ComputedParams;
+export class NotePositioner extends ParameterBag<NotePositionerParams> {
+  private computedParams: ComputedParams;
 
-  constructor(
-    params: KeysRendererParams,
-    private readonly state: PianoState,
-    private readonly renderWhite: boolean
-  ) {
-    super(params);
+  constructor(params: NotePositionerParams) {
+    super(params, {
+      width(width) {
+        if (!(width >= 0)) {
+          throw new Error(`Width must be non-negative, got: ${width}`);
+        }
+      },
+      range(range) {
+        if (!(range.min.byteValue <= range.max.byteValue)) {
+          throw new Error(
+            `Minimum note must be at most than maximum, got range ` +
+              `[${range.min}, ${range.max}]`
+          );
+        }
+      },
+    });
+
     this.computedParams = this.computeParams();
-    this.addEventListener('setWidth', () => {
+    this.addEventListener('width', () => {
       this.computedParams = this.computeParams();
     });
-    this.addEventListener('setEqualizeKeyWidths', () => {
+    this.addEventListener('equalizeKeyWidths', () => {
       this.computedParams = this.computeParams();
     });
-    this.addEventListener('setRange', () => {
+    this.addEventListener('range', () => {
       this.computedParams = this.computeParams();
     });
-
-    this.state.addEventListener(
-      renderWhite ? 'whiteKeyChange' : 'blackKeyChange',
-      () => this.markDirty()
-    );
   }
 
   private computeParams(): ComputedParams {
@@ -282,7 +321,7 @@ class KeysRenderer extends LazyRenderer<KeysRendererParams> {
       max.octave - min.octave + keyCoords[max.key][1] - keyCoords[min.key][0];
 
     return {
-      pixelsPerOctave: this.width / octavesWidth,
+      pixelsPerOctave: this.params.width / octavesWidth,
       octaveOffset: -min.octave - keyCoords[min.key][0],
     };
   }
@@ -295,8 +334,7 @@ class KeysRenderer extends LazyRenderer<KeysRendererParams> {
     const octaveStart = note.octave + this.computedParams.octaveOffset;
     const start = keyCoords[note.key][0];
     return Math.floor(
-      (octaveStart + start) * this.computedParams.pixelsPerOctave +
-        this.params.marginPixels
+      (octaveStart + start) * this.computedParams.pixelsPerOctave
     );
   }
 
@@ -308,14 +346,13 @@ class KeysRenderer extends LazyRenderer<KeysRendererParams> {
     const octaveStart = note.octave + this.computedParams.octaveOffset;
     const end = keyCoords[note.key][1];
     return Math.floor(
-      (octaveStart + end) * this.computedParams.pixelsPerOctave -
-        this.params.marginPixels
+      (octaveStart + end) * this.computedParams.pixelsPerOctave
     );
   }
 
   /** Gets the note corresponding to the provided x coordinate in pixels. */
   getNote(x: number): Note {
-    if (this.width === 0) {
+    if (this.params.width === 0) {
       return this.params.range.min;
     }
 
@@ -323,23 +360,52 @@ class KeysRenderer extends LazyRenderer<KeysRendererParams> {
     const byteValue =
       this.params.range.min.byteValue +
       (this.params.range.max.byteValue + 1 - this.params.range.min.byteValue) *
-        (x / this.width);
+        (x / this.params.width);
     return new Note(
       Math.min(this.params.range.max.byteValue, Math.floor(byteValue))
+    );
+  }
+}
+
+interface KeysRendererParams extends Dimensions {
+  color: string;
+  pressedColor: string;
+  marginPixels: number;
+}
+
+interface MutableNote extends Note {
+  byteValue: number;
+}
+
+class KeysRenderer extends LazyRenderer<KeysRendererParams> {
+  constructor(
+    params: KeysRendererParams,
+    private readonly positioner: NotePositioner,
+    private readonly state: PianoState,
+    private readonly renderWhite: boolean
+  ) {
+    super(params);
+
+    this.state.addEventListener(
+      renderWhite ? 'whiteKeyChange' : 'blackKeyChange',
+      () => this.markDirty()
+    );
+    this.positioner.addEventListener('paramChange', () => this.markDirty());
+    this.positioner.addEventListener('width', (width) =>
+      this.setParam('width', width)
     );
   }
 
   protected override refresh(): void {
     this.context.clearRect(0, 0, this.width, this.height);
     this.context.fillStyle = this.params.color;
-    const keyCoords = this.params.equalizeKeyWidths
+    const keyCoords = this.positioner.params.equalizeKeyWidths
       ? KEY_COORDS_EQUALIZED_BOTTOM
       : KEY_COORDS_BOTTOM;
+    const range = this.positioner.params.range;
 
-    const note: MutableNote = new Note(this.params.range.min.byteValue);
-    const maxNote = this.params.range.max.isWhite
-      ? this.params.range.max
-      : this.params.range.max.transpose(1);
+    const note: MutableNote = new Note(range.min.byteValue);
+    const maxNote = range.max.isWhite ? range.max : range.max.transpose(1);
     let lastPressed = false;
     for (; note.byteValue <= maxNote.byteValue; note.byteValue++) {
       if (note.isWhite !== this.renderWhite) {
@@ -353,109 +419,84 @@ class KeysRenderer extends LazyRenderer<KeysRendererParams> {
           : this.params.color;
         lastPressed = currentPressed;
       }
-      const keyStart = this.getLeftNoteEdge(note, keyCoords);
-      const keyEnd = this.getRightNoteEdge(note, keyCoords);
+      const keyStart =
+        this.positioner.getLeftNoteEdge(note, keyCoords) +
+        this.params.marginPixels;
+      const keyEnd =
+        this.positioner.getRightNoteEdge(note, keyCoords) -
+        this.params.marginPixels;
       this.context.fillRect(keyStart, 0, keyEnd - keyStart, this.height);
     }
   }
 }
 
-const DEFAULT_RANGE = {min: Note.fromString('A0'), max: Note.fromString('C8')};
+export const DEFAULT_RANGE = {
+  min: Note.fromString('A0'),
+  max: Note.fromString('C8'),
+};
 
 export class PianoRenderer {
-  private blackKeyHeightRatio = 0.55;
   private readonly state = new PianoState();
-  private readonly blackKeys = new KeysRenderer(
-    {
-      color: 'black',
-      pressedColor: 'firebrick',
-      width: 1,
-      height: 1,
-      range: DEFAULT_RANGE,
-      marginPixels: 0,
-      equalizeKeyWidths: false,
-    },
-    this.state,
-    /*renderWhite=*/ false
-  );
-  private readonly whiteKeys = new KeysRenderer(
-    {
-      color: 'white',
-      pressedColor: 'salmon',
-      width: 1,
-      height: 1,
-      range: DEFAULT_RANGE,
-      marginPixels: 1,
-      equalizeKeyWidths: false,
-    },
-    this.state,
-    /*renderWhite=*/ true
-  );
+  private readonly blackKeys: KeysRenderer;
+  private readonly whiteKeys: KeysRenderer;
+
+  constructor(
+    readonly positioner: NotePositioner,
+    height: number,
+    private blackKeyHeightRatio = 0.55
+  ) {
+    this.blackKeys = new KeysRenderer(
+      {
+        color: 'black',
+        pressedColor: 'firebrick',
+        width: this.positioner.params.width,
+        height: Math.ceil(height * this.blackKeyHeightRatio),
+        marginPixels: 0,
+      },
+      this.positioner,
+      this.state,
+      /*renderWhite=*/ false
+    );
+    this.whiteKeys = new KeysRenderer(
+      {
+        color: 'white',
+        pressedColor: 'salmon',
+        width: this.positioner.params.width,
+        height: height,
+        marginPixels: 1,
+      },
+      this.positioner,
+      this.state,
+      /*renderWhite=*/ true
+    );
+  }
 
   send(data: Iterable<number>) {
     this.state.send(data);
   }
 
-  /** Gets the [minimum, maximum] note rendered in the piano. */
-  getRange(): [Note, Note] {
-    return [this.blackKeys.params.range.min, this.blackKeys.params.range.max];
+  get height(): number {
+    return this.whiteKeys.height;
   }
 
-  setRange({
-    min = this.blackKeys.params.range.min,
-    max = this.blackKeys.params.range.max,
-  }: Partial<Bounds<Note>>) {
-    if (!(min.byteValue <= max.byteValue)) {
-      throw new Error(
-        `Minimum note must be lower than maximum, got range [${min}, ${max}]`
-      );
-    }
-    this.blackKeys.setParam('range', {min, max});
-  }
-
-  /** Gets the [width, height] of the piano. */
-  getSize(): [number, number] {
-    return [this.whiteKeys.width, this.whiteKeys.height];
-  }
-
-  setSize({
-    width = this.whiteKeys.width,
-    height = this.whiteKeys.height,
-  }: Partial<Dimensions>) {
-    this.whiteKeys.setParam('width', width);
+  setHeight(height: number) {
     this.whiteKeys.setParam('height', height);
-    this.blackKeys.setParam('width', width);
     this.blackKeys.setParam(
       'height',
       Math.ceil(height * this.blackKeyHeightRatio)
     );
   }
 
-  /**
-   * Sets whether key widths should be equalized, making black and white keys
-   * take up equal space. Suitable for overlaying the piano over a logarithmic
-   * frequency axis.
-   */
-  setEqualizeKeyWidths(equalize: boolean) {
-    this.blackKeys.setParam('equalizeKeyWidths', equalize);
-    this.whiteKeys.setParam('equalizeKeyWidths', equalize);
+  setBlackKeyHeightRatio(blackKeyHeightRatio: number) {
+    this.blackKeyHeightRatio = blackKeyHeightRatio;
+    this.blackKeys.setParam(
+      'height',
+      Math.ceil(this.height * blackKeyHeightRatio)
+    );
   }
 
-  getEqualizeKeyWidths(): boolean {
-    return this.whiteKeys.params.equalizeKeyWidths;
-  }
-
-  /** Returns the note coordinates in pixels along the X axis. */
-  getNoteCoords(note: Note): [number, number] {
-    return [
-      this.whiteKeys.getLeftNoteEdge(note),
-      this.whiteKeys.getRightNoteEdge(note),
-    ];
-  }
-
-  /** Gets the note corresponding to the provided x coordinate in pixels. */
-  getNote(x: number): Note {
-    return this.whiteKeys.getNote(x);
+  getBlackKeyHeightRatio() {
+    return this.blackKeyHeightRatio;
   }
 
   drawPianoTo(context: CanvasRenderingContext2D, x: number, y: number) {

@@ -77,7 +77,7 @@ export class Note {
   }
 
   get frequency(): number {
-    return 440 * Math.pow(2, (this.byteValue - A440_BYTE_VALUE) / 12);
+    return noteByteValueToFrequency(this.byteValue);
   }
 
   get isWhite(): boolean {
@@ -109,3 +109,14 @@ export class Note {
 }
 
 const A440_BYTE_VALUE = Note.fromString('A4').byteValue;
+
+export function noteByteValueToFrequency(byteValue: number): number {
+  return 440 * Math.pow(2, (byteValue - A440_BYTE_VALUE) / 12);
+}
+
+export function frequencyToNoteByteValue(frequency: number): number {
+  if (!(frequency > 0)) {
+    throw new Error(`Frequency must be positive, got: ${frequency}`);
+  }
+  return A440_BYTE_VALUE + 12 * Math.log2(frequency / 440);
+}
