@@ -11,7 +11,7 @@ export class TempoMap {
 
   private constructor(
     readonly ticksPerQuarter: number,
-    private readonly tempoChanges: TempoChange[]
+    private readonly tempoChanges: readonly TempoChange[]
   ) {}
 
   static builder(ticksPerQuarter: number, log = false): TempoMapBuilder {
@@ -44,9 +44,7 @@ export class TempoMap {
           );
         }
 
-        const deltaQuarters = (ticks - lastChange.ticks) / ticksPerQuarter;
-        const seconds =
-          lastChange.seconds + deltaQuarters * microsecondsPerQuarter * 1e-6;
+        const seconds = lastChange.ticksToSeconds(ticks, ticksPerQuarter);
         const tempoChange = new TempoChange(
           ticks,
           seconds,
@@ -54,12 +52,11 @@ export class TempoMap {
         );
 
         if (log) {
-          console.log(
-            `Tempo at ${seconds} s: ${60000000 / microsecondsPerQuarter} BPM`
-          );
+          const bpm = (60 * 1e6) / microsecondsPerQuarter;
+          console.log(`Tempo at ${seconds} s: ${bpm.toFixed(1)} BPM`);
         }
 
-        if (deltaQuarters === 0 && tempoChanges.length) {
+        if (ticks === lastChange.ticks && tempoChanges.length) {
           console.warn(
             `Simultaneous tempo changes at ${ticks} ticks. Keeping the last.`
           );
@@ -88,29 +85,28 @@ export class TempoMap {
     if (!(ticks >= 0)) {
       throw new Error(`Ticks must be non-negative, got: ${ticks}`);
     }
-    const relevantTempoChange =
-      this.tempoChanges.findLast((tempoChange) => ticks >= tempoChange.ticks) ??
-      DEFAULT_TEMPO;
-    const deltaQuarters =
-      (ticks - relevantTempoChange.ticks) / this.ticksPerQuarter;
-    return (
-      relevantTempoChange.seconds +
-      deltaQuarters * relevantTempoChange.microsecondsPerQuarter * 1e-6
-    );
+
+    let relevantTempoChange = DEFAULT_TEMPO;
+    for (let i = this.tempoChanges.length - 1; i >= 0; i--) {
+      if (ticks >= this.tempoChanges[i].ticks) {
+        relevantTempoChange = this.tempoChanges[i];
+      }
+    }
+    return relevantTempoChange.ticksToSeconds(ticks, this.ticksPerQuarter);
   }
 
   secondsToTicks(seconds: number): number {
     if (!(seconds >= 0)) {
       throw new Error(`Seconds must be non-negative, got: ${seconds}`);
     }
-    const relevantTempoChange =
-      this.tempoChanges.findLast(
-        (tempoChange) => seconds >= tempoChange.seconds
-      ) ?? DEFAULT_TEMPO;
-    const deltaQuarters =
-      (1e6 * (seconds - relevantTempoChange.seconds)) /
-      relevantTempoChange.microsecondsPerQuarter;
-    return relevantTempoChange.ticks + deltaQuarters * this.ticksPerQuarter;
+
+    let relevantTempoChange = DEFAULT_TEMPO;
+    for (let i = this.tempoChanges.length - 1; i >= 0; i--) {
+      if (seconds >= this.tempoChanges[i].seconds) {
+        relevantTempoChange = this.tempoChanges[i];
+      }
+    }
+    return relevantTempoChange.secondsToTicks(seconds, this.ticksPerQuarter);
   }
 
   getDivision(): Uint8Array {
@@ -127,6 +123,17 @@ class TempoChange {
     readonly seconds: number,
     readonly microsecondsPerQuarter: number
   ) {}
+
+  ticksToSeconds(ticks: number, ticksPerQuarter: number): number {
+    const deltaQuarters = (ticks - this.ticks) / ticksPerQuarter;
+    return this.seconds + deltaQuarters * this.microsecondsPerQuarter * 1e-6;
+  }
+
+  secondsToTicks(seconds: number, ticksPerQuarter: number): number {
+    const deltaQuarters =
+      (1e6 * (seconds - this.seconds)) / this.microsecondsPerQuarter;
+    return this.ticks + deltaQuarters * ticksPerQuarter;
+  }
 }
 
 /** The default tempo is 120 BPM. */
