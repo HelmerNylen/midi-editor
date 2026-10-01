@@ -12,7 +12,7 @@ import {Note, NoteString} from './note.js';
 import {Player} from './player.js';
 import {PianoRenderer} from './rendering.js';
 import {Selector} from './selector.js';
-import {INCONCLUSIVE, KeyPress, Span} from './song.js';
+import {INCONCLUSIVE, KeyPress, Span, Switch} from './song.js';
 import {TempoMap} from './tempo.js';
 import {elementDeps, sleep} from './utils.js';
 import {Viewport} from './viewport.js';
@@ -25,6 +25,8 @@ const ONE_BY_MAX_VELOCITY = 1 / 0xff;
 const KEY_GAP_COLOR = '#222';
 const WHITE_KEY_NOTE_COLOR = 'salmon';
 const BLACK_KEY_NOTE_COLOR = 'firebrick';
+const PEDAL_DOWN_COLOR = 'salmon';
+const PEDAL_UP_COLOR = 'firebrick';
 const DEFAULT_TEMPO_MAP = TempoMap.builder(96).build();
 
 interface EditorData {
@@ -41,6 +43,7 @@ export class Editor {
     noteCanvas: HTMLCanvasElement,
     midiUpload: HTMLButtonElement,
     midiUploadInput: HTMLInputElement,
+    fetch: HTMLButtonElement,
   });
   private readonly viewport = new Viewport(
     this.elements.noteCanvas,
@@ -78,9 +81,11 @@ export class Editor {
     tempo: DEFAULT_TEMPO_MAP,
     instrumentsByChannel: new Map<number, Instrument>(),
   };
+  private playPromise: Promise<void> | null = null;
   private playStartedAt: number | null = null;
   private moveStart: {note: Note; ticks: number} | null = null;
   private drawContext = this.elements.noteCanvas.getContext('2d')!;
+  private playbackElapsedTicks: number | null = null;
 
   constructor() {
     if (!this.drawContext) {
@@ -133,6 +138,10 @@ export class Editor {
           break;
       }
     });
+    this.elements.fetch.addEventListener('click', async () => {
+      const response = await fetch('audio/stuffa.mid');
+      this.onMidiUpload(await response.blob());
+    });
 
     this.resizeCanvas();
     requestAnimationFrame((time) => this.draw(time));
@@ -146,10 +155,12 @@ export class Editor {
   }
 
   async play() {
-    if (this.playStartedAt !== null) {
+    if (this.playPromise !== null) {
       this.playStartedAt = null;
       return;
     }
+    const {promise, resolve} = Promise.withResolvers<void>();
+    this.playPromise = promise;
     this.playStartedAt = performance.now();
 
     for (const [
@@ -189,6 +200,7 @@ export class Editor {
       this.playStartedAt =
         performance.now() -
         this.editorData.tempo.ticksToSeconds(event.ticks) * 1000;
+      this.playbackElapsedTicks = event.ticks;
       this.player.send(event.message);
     }
 
@@ -211,7 +223,17 @@ export class Editor {
           channel
         )
       );
+      this.player.send(
+        new ChannelControlMessage(
+          ChannelControlType.ALL_NOTES_OFF,
+          0,
+          channel
+        )
+      );
     }
+    this.playPromise = null;
+    this.playbackElapsedTicks = null;
+    resolve();
   }
 
   private onCanvasMouseDown(e: MouseEvent) {
@@ -264,7 +286,7 @@ export class Editor {
     }
   }
 
-  private async onMidiUpload(file: File | null) {
+  private async onMidiUpload(file: Blob | null) {
     if (!file) {
       return;
     }
@@ -351,32 +373,58 @@ export class Editor {
     let lastVelocity: number | undefined = undefined;
     for (const span of this.editorData.spans) {
       if (
-        !('note' in span) ||
         span.start > this.viewport.ticksMax ||
         span.end < this.viewport.ticksMin
       ) {
         continue;
       }
 
-      const x0 = this.viewport.noteLeftEdgeToPixels((span as KeyPress).note);
-      const x1 = this.viewport.noteRightEdgeToPixels((span as KeyPress).note);
-      const y0 = this.viewport.ticksToPixels(span.start);
-      const y1 = this.viewport.ticksToPixels(span.end);
+      if ('note' in span) {
+        const x0 = this.viewport.noteLeftEdgeToPixels((span as KeyPress).note);
+        const x1 = this.viewport.noteRightEdgeToPixels((span as KeyPress).note);
+        const y0 = this.viewport.ticksToPixels(span.start);
+        const y1 = this.viewport.ticksToPixels(span.end);
 
-      const color = (span as KeyPress).note.isWhite
-        ? WHITE_KEY_NOTE_COLOR
-        : BLACK_KEY_NOTE_COLOR;
-      if (color !== lastColor) {
-        this.drawContext.fillStyle = color;
-        lastColor = color;
+        const color = (span as KeyPress).note.isWhite
+          ? WHITE_KEY_NOTE_COLOR
+          : BLACK_KEY_NOTE_COLOR;
+        if (color !== lastColor) {
+          this.drawContext.fillStyle = color;
+          lastColor = color;
+        }
+        const velocity = (span as KeyPress).velocity;
+        if (velocity !== lastVelocity) {
+          this.drawContext.globalAlpha =
+            0.2 + 0.8 * velocity * ONE_BY_MAX_VELOCITY;
+          lastVelocity = velocity;
+        }
+        this.drawContext.fillRect(x0, y1, x1 - x0, y0 - y1);
+      } else if ('pedal' in span) {
+        if ((span as Switch).pedal !== ChannelControlType.SUSTAIN) {
+          continue;
+        }
+        this.drawContext.globalAlpha = 1;
+        const y0 = this.viewport.ticksToPixels(span.start);
+        this.drawContext.strokeStyle = PEDAL_DOWN_COLOR;
+        this.drawContext.lineWidth = 1;
+        this.drawContext.setLineDash([]);
+        this.drawContext.beginPath();
+        // TODO: Relative viewport coords to pixels transform.
+        this.drawContext.moveTo(0, y0);
+        this.drawContext.lineTo(this.viewport.width, y0);
+        this.drawContext.closePath();
+        this.drawContext.stroke();
+
+        const y1 = this.viewport.ticksToPixels(span.end);
+        this.drawContext.strokeStyle = PEDAL_UP_COLOR;
+        this.drawContext.setLineDash([5, 15]);
+        this.drawContext.beginPath();
+        this.drawContext.moveTo(0, y1);
+        this.drawContext.lineTo(this.viewport.width, y1);
+        this.drawContext.closePath();
+        this.drawContext.stroke();
+        lastVelocity = undefined;
       }
-      const velocity = (span as KeyPress).velocity;
-      if (velocity !== lastVelocity) {
-        this.drawContext.globalAlpha =
-          0.2 + 0.8 * velocity * ONE_BY_MAX_VELOCITY;
-        lastVelocity = velocity;
-      }
-      this.drawContext.fillRect(x0, y1, x1 - x0, y0 - y1);
     }
 
     // Draw lines between white keys.
@@ -386,6 +434,31 @@ export class Editor {
 
     this.pianoRenderer.drawPianoTo(this.drawContext, 0, pianoStartY);
     this.pianoRenderer.drawPedalsTo(this.drawContext, 0, pianoStartY);
+
+    if (this.playStartedAt !== null) {
+      this.drawContext.fillStyle = 'white';
+      this.drawContext.font = '10px sans-serif';
+      this.drawContext.fillText(
+        `Elapsed: ${elapsedTime.toFixed(2)} s`,
+        5,
+        12
+      );
+      this.drawContext.fillText(
+        `Started at: ${(this.playStartedAt / 1000).toFixed(2)} s`,
+        5,
+        24
+      );
+      this.drawContext.fillText(
+        `Last event: ${this.playbackElapsedTicks} ticks`,
+        5,
+        36
+      );
+      const bpm =
+        60e6 /
+        this.editorData.tempo.tempoAtSeconds(elapsedTime)
+          .microsecondsPerQuarter;
+      this.drawContext.fillText(`Tempo: ${bpm.toFixed(2)} BPM`, 5, 48);
+    }
 
     this.drawContext.restore();
     requestAnimationFrame((time) => this.draw(time));

@@ -58,7 +58,8 @@ export class TempoMap {
 
         if (ticks === lastChange.ticks && tempoChanges.length) {
           console.warn(
-            `Simultaneous tempo changes at ${ticks} ticks. Keeping the last.`
+            `Simultaneous tempo changes at ${ticks} ticks (${seconds} s). ` +
+              `Keeping the last.`
           );
           tempoChanges[tempoChanges.length - 1] = tempoChange;
         } else {
@@ -81,7 +82,8 @@ export class TempoMap {
     };
   }
 
-  ticksToSeconds(ticks: number): number {
+  // TODO: Either export TempoChange or don't make these public.
+  tempoAtTicks(ticks: number): TempoChange {
     if (!(ticks >= 0)) {
       throw new Error(`Ticks must be non-negative, got: ${ticks}`);
     }
@@ -90,12 +92,13 @@ export class TempoMap {
     for (let i = this.tempoChanges.length - 1; i >= 0; i--) {
       if (ticks >= this.tempoChanges[i].ticks) {
         relevantTempoChange = this.tempoChanges[i];
+        break;
       }
     }
-    return relevantTempoChange.ticksToSeconds(ticks, this.ticksPerQuarter);
+    return relevantTempoChange;
   }
 
-  secondsToTicks(seconds: number): number {
+  tempoAtSeconds(seconds: number): TempoChange {
     if (!(seconds >= 0)) {
       throw new Error(`Seconds must be non-negative, got: ${seconds}`);
     }
@@ -104,9 +107,21 @@ export class TempoMap {
     for (let i = this.tempoChanges.length - 1; i >= 0; i--) {
       if (seconds >= this.tempoChanges[i].seconds) {
         relevantTempoChange = this.tempoChanges[i];
+        break;
       }
     }
-    return relevantTempoChange.secondsToTicks(seconds, this.ticksPerQuarter);
+    return relevantTempoChange;
+  }
+
+  ticksToSeconds(ticks: number): number {
+    return this.tempoAtTicks(ticks).ticksToSeconds(ticks, this.ticksPerQuarter);
+  }
+
+  secondsToTicks(seconds: number): number {
+    return this.tempoAtSeconds(seconds).secondsToTicks(
+      seconds,
+      this.ticksPerQuarter
+    );
   }
 
   getDivision(): Uint8Array {
