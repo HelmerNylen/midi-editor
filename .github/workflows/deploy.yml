@@ -10,6 +10,7 @@ on:
       - '**.ts'
       - '**.html'
       - '**.css'
+      - '**.mid'
 
 permissions:
   contents: read
@@ -38,6 +39,7 @@ jobs:
       - name: Move to output folder
         run: |
           mkdir out
+          cp -r audio/ out/
           cp -r js/ out/
           cp -r ts/ out/
           cp *.{html,css} out/
